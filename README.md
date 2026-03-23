@@ -87,7 +87,7 @@ Examples:
 ```bash
 npx wechat-acp --agent copilot
 npx wechat-acp --agent claude --cwd D:\code\project
-npx wechat-acp --agent "npx @github/copilot-language-server --acp"
+npx wechat-acp --agent "npx @github/copilot --acp"
 npx wechat-acp --agent gemini --daemon
 ```
 
