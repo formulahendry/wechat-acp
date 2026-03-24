@@ -59,6 +59,12 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
     args: ["opencode-ai", "acp"],
     description: "OpenCode",
   },
+  qoder: {
+    label: "Qoder CLI",
+    command: "qodercli",
+    args: ["--acp"],
+    description: "Qoder CLI ACP",
+  },
 };
 
 export interface WeChatAcpConfig {

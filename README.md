@@ -59,6 +59,7 @@ Current presets:
 - `qwen`
 - `codex`
 - `opencode`
+- `qoder`
 
 These presets resolve to concrete `command + args` pairs internally, so users do not need to type long `npx ...` commands.
 
@@ -88,6 +89,7 @@ Examples:
 npx wechat-acp --agent copilot
 npx wechat-acp --agent claude --cwd D:\code\project
 npx wechat-acp --agent "npx @github/copilot --acp"
+npx wechat-acp --agent qoder
 npx wechat-acp --agent gemini --daemon
 ```
 
