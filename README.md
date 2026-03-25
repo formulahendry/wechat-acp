@@ -78,7 +78,7 @@ Options:
 - `--login`: force QR re-login and replace the saved token
 - `--daemon`: run in background after startup
 - `--config <file>`: load JSON config file
-- `--idle-timeout <minutes>`: session idle timeout, default `30`
+- `--idle-timeout <minutes>`: session idle timeout, default `1440` (use `0` for unlimited)
 - `--max-sessions <count>`: maximum concurrent user sessions, default `10`
 - `-h, --help`: show help
 
@@ -104,7 +104,7 @@ Example:
     "cwd": "D:/code/project"
   },
   "session": {
-    "idleTimeoutMs": 1800000,
+    "idleTimeoutMs": 86400000,
     "maxConcurrentUsers": 10
   }
 }
@@ -134,7 +134,7 @@ You can also override or add agent presets:
 - Messages are processed serially per user.
 - Replies are formatted for WeChat before sending.
 - Typing indicators are sent when supported by the WeChat API.
-- Sessions are cleaned up after inactivity.
+- Sessions are cleaned up after inactivity (set `idleTimeoutMs` to `0` to disable idle cleanup).
 
 ## Storage
 

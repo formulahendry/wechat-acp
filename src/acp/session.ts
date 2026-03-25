@@ -155,6 +155,9 @@ export class SessionManager {
         session.client.flush();
 
         try {
+          // Send typing immediately so user knows the prompt was received
+          this.opts.sendTyping(session.userId, pending.contextToken).catch(() => {});
+
           // Send ACP prompt
           this.opts.log(`[${session.userId}] Sending prompt to agent...`);
           const result = await session.agentInfo.connection.prompt({
@@ -205,6 +208,10 @@ export class SessionManager {
   }
 
   private cleanupIdleSessions(): void {
+    if (this.opts.idleTimeoutMs <= 0) {
+      return;
+    }
+
     const now = Date.now();
     for (const [userId, session] of this.sessions) {
       if (now - session.lastActivity > this.opts.idleTimeoutMs && !session.processing) {

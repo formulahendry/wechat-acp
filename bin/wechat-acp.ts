@@ -46,7 +46,8 @@ Options:
   --login             Force re-login (new QR code)
   --daemon            Run in background after login
   --config <file>     Config file path (JSON)
-  --idle-timeout <m>  Session idle timeout in minutes (default: 30)
+  --idle-timeout <m>  Session idle timeout in minutes (default: 1440)
+                      Use 0 to disable idle cleanup
   --max-sessions <n>  Max concurrent user sessions (default: 10)
   -v, --verbose       Verbose logging
   -h, --help          Show this help
@@ -267,7 +268,14 @@ async function main(): Promise<void> {
   }
 
   if (args.cwd) config.agent.cwd = path.resolve(args.cwd);
-  if (args.idleTimeout) config.session.idleTimeoutMs = args.idleTimeout * 60_000;
+  if (args.idleTimeout !== undefined) {
+    if (!Number.isFinite(args.idleTimeout) || args.idleTimeout < 0) {
+      console.error("Error: invalid --idle-timeout value");
+      console.error('Use a non-negative integer minute value, where "0" means unlimited.');
+      process.exit(1);
+    }
+    config.session.idleTimeoutMs = args.idleTimeout * 60_000;
+  }
   if (args.maxSessions) config.session.maxConcurrentUsers = args.maxSessions;
   config.daemon.enabled = args.daemon;
 

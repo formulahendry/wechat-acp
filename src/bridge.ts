@@ -133,6 +133,24 @@ export class WeChatAcpBridge {
         contextToken,
       });
     }
+
+    // Cancel typing indicator after reply is sent
+    this.cancelTypingIndicator(userId, contextToken).catch(() => {});
+  }
+
+  private async cancelTypingIndicator(userId: string, contextToken: string): Promise<void> {
+    const ticket = await this.getTypingTicket(userId, contextToken);
+    if (!ticket) return;
+
+    await sendTyping({
+      baseUrl: this.tokenData!.baseUrl,
+      token: this.tokenData!.token,
+      body: {
+        ilink_user_id: userId,
+        typing_ticket: ticket,
+        status: TypingStatus.CANCEL,
+      },
+    });
   }
 
   private async sendTypingIndicator(userId: string, contextToken: string): Promise<void> {

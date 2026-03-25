@@ -115,7 +115,7 @@ export function defaultConfig(): WeChatAcpConfig {
     },
     agents: { ...BUILT_IN_AGENTS },
     session: {
-      idleTimeoutMs: 30 * 60_000, // 30 minutes
+      idleTimeoutMs: 1440 * 60_000, // 24 hours
       maxConcurrentUsers: 10,
     },
     daemon: {
