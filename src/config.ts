@@ -23,6 +23,12 @@ export interface ResolvedAgentConfig extends AgentCommandConfig {
 }
 
 export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
+  hermes: {
+    label: "Hermes Agent",
+    command: "hermes",
+    args: ["acp"],
+    description: "Hermes Agent ACP mode",
+  },
   copilot: {
     label: "GitHub Copilot",
     command: "npx",
