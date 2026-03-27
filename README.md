@@ -53,6 +53,7 @@ npx wechat-acp agents
 
 Current presets:
 
+- `cursor`
 - `copilot`
 - `claude`
 - `gemini`
@@ -88,8 +89,15 @@ Examples:
 ```bash
 npx wechat-acp --agent copilot
 npx wechat-acp --agent claude --cwd D:\code\project
+npx wechat-acp --agent cursor
 npx wechat-acp --agent "npx @github/copilot --acp"
 npx wechat-acp --agent gemini --daemon
+```
+
+For the `cursor` preset, make sure Cursor CLI is authenticated first:
+
+```bash
+cursor agent login
 ```
 
 ## Configuration File

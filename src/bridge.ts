@@ -105,7 +105,7 @@ export class WeChatAcpBridge {
 
     // Convert and enqueue — fire-and-forget (don't block the poll loop)
     this.enqueueMessage(msg, userId, contextToken).catch((err) => {
-      this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
+      this.log(`Failed to enqueue message from ${userId}: ${formatError(err)}`);
     });
   }
 
@@ -211,5 +211,17 @@ export class WeChatAcpBridge {
       if (item.type === 5) return "[video]";
     }
     return "[empty]";
+  }
+}
+
+function formatError(err: unknown): string {
+  if (err instanceof Error) {
+    return err.stack ?? `${err.name}: ${err.message}`;
+  }
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
   }
 }

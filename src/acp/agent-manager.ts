@@ -73,6 +73,13 @@ export async function spawnAgent(params: {
   });
   log(`ACP initialized (protocol v${initResult.protocolVersion})`);
 
+  const authMethod = pickAuthMethod(initResult.authMethods);
+  if (authMethod) {
+    log(`Authenticating ACP client via "${authMethod}"...`);
+    await connection.authenticate({ methodId: authMethod });
+    log("ACP authentication completed");
+  }
+
   // Create session
   log("Creating ACP session...");
   const sessionResult = await connection.newSession({
@@ -86,6 +93,16 @@ export async function spawnAgent(params: {
     connection,
     sessionId: sessionResult.sessionId,
   };
+}
+
+function pickAuthMethod(
+  authMethods?: Array<{ id: string }> | null,
+): string | null {
+  if (!authMethods || authMethods.length === 0) return null;
+
+  // Prefer cursor_login when available, then fallback to first advertised method.
+  const cursorLogin = authMethods.find((method) => method.id === "cursor_login");
+  return cursorLogin?.id ?? authMethods[0]?.id ?? null;
 }
 
 export function killAgent(proc: ChildProcess): void {
