@@ -25,6 +25,7 @@ export class WeChatAcpBridge {
   private tokenData: TokenData | null = null;
   // Per-user typing ticket cache
   private typingTickets = new Map<string, { ticket: string; expiresAt: number }>();
+  private userLocks = new Map<string, Promise<void>>();
   private log: (msg: string) => void;
 
   constructor(config: WeChatAcpConfig, log?: (msg: string) => void) {
@@ -103,10 +104,11 @@ export class WeChatAcpBridge {
 
     this.log(`Message from ${userId}: ${this.previewMessage(msg)}`);
 
-    // Convert and enqueue — fire-and-forget (don't block the poll loop)
-    this.enqueueMessage(msg, userId, contextToken).catch((err) => {
-      this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
-    });
+    // Fire-and-forget (don't block the poll loop), but serialize per-user
+    // to prevent concurrent session creation
+    const prev = this.userLocks.get(userId) ?? Promise.resolve();
+    const next = prev.then(() => this.enqueueMessage(msg, userId, contextToken));
+    this.userLocks.set(userId, next.catch(() => {}));
   }
 
   private async enqueueMessage(
