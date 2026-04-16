@@ -88,6 +88,7 @@ export class WeChatAcpBridge {
     this.log("Stopping bridge...");
     this.abortController.abort();
     await this.sessionManager?.stop();
+    this.userLocks.clear();
     this.log("Bridge stopped");
   }
 
@@ -107,8 +108,17 @@ export class WeChatAcpBridge {
     // Fire-and-forget (don't block the poll loop), but serialize per-user
     // to prevent concurrent session creation
     const prev = this.userLocks.get(userId) ?? Promise.resolve();
-    const next = prev.then(() => this.enqueueMessage(msg, userId, contextToken));
-    this.userLocks.set(userId, next.catch(() => {}));
+    const next = prev
+      .then(() => this.enqueueMessage(msg, userId, contextToken))
+      .catch((err) => {
+        this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
+      })
+      .finally(() => {
+        if (this.userLocks.get(userId) === next) {
+          this.userLocks.delete(userId);
+        }
+      });
+    this.userLocks.set(userId, next);
   }
 
   private async enqueueMessage(
