@@ -26,6 +26,8 @@ export class WeChatAcpBridge {
   // Per-user typing ticket cache
   private typingTickets = new Map<string, { ticket: string; expiresAt: number }>();
   private userLocks = new Map<string, Promise<void>>();
+  private stopping = false;
+  private stopped = false;
   private log: (msg: string) => void;
 
   constructor(config: WeChatAcpConfig, log?: (msg: string) => void) {
@@ -85,14 +87,23 @@ export class WeChatAcpBridge {
   }
 
   async stop(): Promise<void> {
+    if (this.stopped || this.stopping) {
+      return;
+    }
+
+    this.stopping = true;
     this.log("Stopping bridge...");
     this.abortController.abort();
     await this.sessionManager?.stop();
+    this.sessionManager = null;
     this.userLocks.clear();
+    this.stopped = true;
     this.log("Bridge stopped");
   }
 
   private handleMessage(msg: WeixinMessage): void {
+    if (this.stopping || this.stopped) return;
+
     // Only process user messages (not bot's own messages)
     if (msg.message_type !== MessageType.USER) return;
 
@@ -109,7 +120,12 @@ export class WeChatAcpBridge {
     // to prevent concurrent session creation
     const prev = this.userLocks.get(userId) ?? Promise.resolve();
     const next = prev
-      .then(() => this.enqueueMessage(msg, userId, contextToken))
+      .then(() => {
+        if (this.stopping || this.stopped || this.sessionManager == null) {
+          return;
+        }
+        return this.enqueueMessage(msg, userId, contextToken);
+      })
       .catch((err) => {
         this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
       })
