@@ -116,15 +116,19 @@ export class WeChatAcpBridge {
 
     this.log(`Message from ${userId}: ${this.previewMessage(msg)}`);
 
+    // Capture the current session manager so async enqueueing does not
+    // race with stop() nulling out this.sessionManager.
+    const sessionManager = this.sessionManager;
+
     // Fire-and-forget (don't block the poll loop), but serialize per-user
     // to prevent concurrent session creation
     const prev = this.userLocks.get(userId) ?? Promise.resolve();
     const next = prev
       .then(() => {
-        if (this.stopping || this.stopped || this.sessionManager == null) {
+        if (this.stopping || this.stopped || sessionManager == null) {
           return;
         }
-        return this.enqueueMessage(msg, userId, contextToken);
+        return this.enqueueMessage(msg, userId, contextToken, sessionManager);
       })
       .catch((err) => {
         this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
