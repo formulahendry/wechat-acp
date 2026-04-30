@@ -38,9 +38,18 @@ export class WeChatAcpClient implements acp.Client {
   async requestPermission(
     params: acp.RequestPermissionRequest,
   ): Promise<acp.RequestPermissionResponse> {
-    // Auto-allow: find first "allow" option
+    // Auto-allow: find first "allow" option.
+    // Different agents may use snake_case or kebab-case option kinds.
     const allowOpt = params.options.find(
-      (o) => o.kind === "allow_once" || o.kind === "allow_always",
+      (o) => {
+        const kind = String((o as { kind?: string }).kind ?? "");
+        return (
+          kind === "allow_once" ||
+          kind === "allow_always" ||
+          kind === "allow-once" ||
+          kind === "allow-always"
+        );
+      },
     );
     const optionId = allowOpt?.optionId ?? params.options[0]?.optionId ?? "allow";
 

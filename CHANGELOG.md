@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add built-in `cursor` agent preset (`cursor agent acp`)
+- Authenticate with advertised ACP auth methods before creating sessions (supports Cursor `cursor_login`)
+- Broaden auto-allow permission option matching to support both snake_case and kebab-case kinds
+- Improve enqueue error logging by printing structured error details
+
 ## 0.1.2
 
 - Add `--show-thoughts` flag to forward agent thinking to WeChat (off by default)

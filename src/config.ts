@@ -23,6 +23,12 @@ export interface ResolvedAgentConfig extends AgentCommandConfig {
 }
 
 export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
+  cursor: {
+    label: "Cursor Agent (ACP)",
+    command: "cursor",
+    args: ["agent", "acp"],
+    description: "Cursor CLI ACP",
+  },
   copilot: {
     label: "GitHub Copilot",
     command: "npx",
