@@ -34,6 +34,7 @@ export async function spawnAgent(params: {
     cwd,
     env: { ...process.env, ...env },
     shell: useShell,
+    windowsHide: true,
   });
 
   proc.on("error", (err) => {
