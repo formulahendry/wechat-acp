@@ -203,6 +203,7 @@ function daemonize(config: WeChatAcpConfig): void {
     detached: true,
     stdio: ["ignore", out, err],
     env: { ...process.env, WECHAT_ACP_DAEMON: "1" },
+    windowsHide: true,
   });
 
   child.unref();
