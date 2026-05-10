@@ -32,7 +32,7 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
   claude: {
     label: "Claude Code",
     command: "npx",
-    args: ["@zed-industries/claude-code-acp"],
+    args: ["@agentclientprotocol/claude-agent-acp"],
     description: "Claude Code ACP",
   },
   gemini: {
