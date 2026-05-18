@@ -80,6 +80,7 @@ Options:
 - `--login`: force QR re-login and replace the saved token
 - `--daemon`: run in background after startup
 - `--config <file>`: load JSON config file
+- `--instance <name>`: run as a named, isolated instance. See "Running multiple instances" below.
 - `--idle-timeout <minutes>`: session idle timeout, default `1440` (use `0` for unlimited)
 - `--max-sessions <count>`: maximum concurrent user sessions, default `10`
 - `--hide-thoughts`: do not forward agent thinking to WeChat (default: forwarded)
@@ -93,6 +94,31 @@ npx wechat-acp --agent claude --cwd D:\code\project
 npx wechat-acp --agent "npx @github/copilot --acp"
 npx wechat-acp --agent gemini --daemon
 ```
+
+## Running multiple instances
+
+By default everything (saved login token, daemon pid/log, sync state, telemetry id) lives under `~/.wechat-acp/`, which means a single machine can only host one bridge at a time. Pass `--instance <name>` to namespace all of that under `~/.wechat-acp/instances/<name>/` and run several bridges side by side, each with its own WeChat account and project directory.
+
+Typical setup: WeChat account 1 drives project A, WeChat account 2 drives project B.
+
+```bash
+# Terminal 1: scan with WeChat account 1
+npx wechat-acp --instance projA --agent copilot --cwd D:\code\repo-a
+
+# Terminal 2: scan with WeChat account 2
+npx wechat-acp --instance projB --agent copilot --cwd D:\code\repo-b
+```
+
+The first run of each instance prints its own QR code. Tokens are saved per instance, so subsequent runs reuse them independently.
+
+The `stop` and `status` subcommands also honor `--instance`:
+
+```bash
+npx wechat-acp status --instance projA
+npx wechat-acp stop   --instance projB
+```
+
+Without `--instance`, paths fall back to `~/.wechat-acp/` exactly as before, so existing installs are unaffected.
 
 ## Configuration File
 
@@ -154,6 +180,8 @@ This directory is used for:
 - daemon log file
 - sync state
 - anonymous telemetry install id (`telemetry-id`, see Telemetry section)
+
+When `--instance <name>` is used, the same files live under `~/.wechat-acp/instances/<name>/` instead, fully isolated from other instances.
 
 ## Current Limitations
 

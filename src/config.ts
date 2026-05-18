@@ -87,15 +87,19 @@ export interface WeChatAcpConfig {
   };
   storage: {
     dir: string;
+    instance?: string;
   };
 }
 
-export function defaultStorageDir(): string {
-  return path.join(os.homedir(), ".wechat-acp");
+export function defaultStorageDir(instance?: string): string {
+  const root = path.join(os.homedir(), ".wechat-acp");
+  if (!instance) return root;
+  return path.join(root, "instances", instance);
 }
 
-export function defaultConfig(): WeChatAcpConfig {
-  const storageDir = defaultStorageDir();
+export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
+  const instance = opts?.instance;
+  const storageDir = defaultStorageDir(instance);
   return {
     wechat: {
       baseUrl: "https://ilinkai.weixin.qq.com",
@@ -121,6 +125,7 @@ export function defaultConfig(): WeChatAcpConfig {
     },
     storage: {
       dir: storageDir,
+      instance,
     },
   };
 }
