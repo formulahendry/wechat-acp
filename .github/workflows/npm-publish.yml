@@ -28,7 +28,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # Node 24 ships npm 11.x which supports OIDC trusted publishing.
+          # Node 20 ships npm 10.8.2 and silently falls back to token auth,
+          # which surfaces as a misleading 404 from the registry.
+          # See https://github.com/npm/cli/issues/8730.
+          node-version: 24
           registry-url: https://registry.npmjs.org/
       - name: Verify package.json version matches release tag
         env:
