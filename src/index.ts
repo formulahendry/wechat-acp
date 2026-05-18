@@ -16,4 +16,5 @@ export {
 	listBuiltInAgents,
 	parseAgentCommand,
 	resolveAgentSelection,
+	validateInstanceName,
 } from "./config.js";

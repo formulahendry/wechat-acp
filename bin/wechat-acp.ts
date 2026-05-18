@@ -22,6 +22,7 @@ import {
   defaultStorageDir,
   listBuiltInAgents,
   resolveAgentSelection,
+  validateInstanceName,
 } from "../src/config.js";
 import type { WeChatAcpConfig } from "../src/config.js";
 import {
@@ -243,6 +244,15 @@ async function main(): Promise<void> {
   if (args.help) {
     usage();
     process.exit(0);
+  }
+
+  if (args.instance !== undefined) {
+    try {
+      validateInstanceName(args.instance);
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
   }
 
   const config = defaultConfig({ instance: args.instance });
