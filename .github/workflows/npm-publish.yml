@@ -1,0 +1,35 @@
+# Publish the npm package on GitHub Release.
+#
+# Uses npm trusted publishing (OIDC) via `--provenance`, so no NPM_TOKEN is
+# required in the repo secrets. The maintainer must register this workflow
+# as a trusted publisher on npmjs.com once:
+#   https://www.npmjs.com/package/wechat-acp/access -> Publishing access
+#     -> "Trusted Publisher" -> GitHub Actions
+#     repo: formulahendry/wechat-acp
+#     workflow: npm-publish.yml
+#     environment: (leave blank)
+#
+# After that, create a GitHub Release (tagged e.g. v0.1.5) and this workflow
+# will publish wechat-acp@0.1.5 to npm with build provenance attached.
+
+name: publish-on-release
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org/
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm publish --provenance --access public
