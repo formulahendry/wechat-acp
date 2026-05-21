@@ -201,30 +201,52 @@ async function buildBinaryFileText(
 // Permissions: 0o600 on the file and 0o700 on the inbox dir so that on
 // multi-user POSIX systems received files (which often contain personal
 // info: IDs, contracts, photos…) aren't readable by other local users.
-// Ignored by Windows but harmless there.
+// We apply both via the {mode} option AND an explicit chmod after the
+// op, because:
+//   - mkdir's {mode} is only applied to dirs we *create*; if the inbox
+//     dir already exists with looser perms (e.g. from a previous bridge
+//     version, or a hand-created dir), {mode} silently does nothing.
+//   - writeFile's {mode} is subject to the process umask: in practice
+//     umask can only *remove* bits, so 0o600 → at most 0o600, which is
+//     fine for confidentiality — the explicit chmod is just belt-and-
+//     braces against a future change that uses a less minimal mode.
+// Both chmods are best-effort: failures (e.g. on Windows where chmod
+// is largely a no-op, or on a network mount with restricted perms)
+// don't block the save itself.
 const INBOX_DIR_MODE = 0o700;
 const INBOX_FILE_MODE = 0o600;
-// Safety cap on the EEXIST retry loop. Each retry uses a new millisecond
-// timestamp, so colliding past this count is essentially impossible — the
-// cap is just a belt-and-braces guard against an unforeseen infinite loop.
+// Safety cap on the EEXIST retry loop. With a deterministic numeric
+// suffix per attempt, true collision past this count is essentially
+// impossible; the cap exists only to bound a pathological hot loop.
 const INBOX_MAX_COLLISION_RETRIES = 100;
 
 /**
  * Write `buffer` into `inboxDir` and return the absolute path.
  *
- * Filename convention: `${ISO-timestamp}-${safeName}`, where
- *   - the timestamp uses ISO 8601 with colons replaced by dashes so the
- *     name is valid on Windows/macOS/Linux,
- *   - `safeName` replaces filesystem-unsafe characters (`/`, `\`, ASCII
- *     control chars, leading dots) with `_`, while preserving Unicode
- *     (so Chinese filenames stay readable),
+ * Filename convention: `${ISO-timestamp}-${safeName}` for the first
+ * attempt, `${ISO-timestamp}-${N}-${safeName}` on the Nth retry, where
+ *   - the timestamp uses ISO 8601 with colons and dots replaced by
+ *     dashes (so the name avoids characters reserved on Windows),
+ *   - `safeName` is `fileName` with path separators stripped, ASCII
+ *     control + Windows-reserved chars (`<>:"/\|?*`) replaced by `_`,
+ *     leading dots and trailing dots/spaces (which Windows silently
+ *     trims) normalized to `_`, while Unicode is preserved so Chinese
+ *     filenames stay readable,
  *   - if the sanitized name is empty, it falls back to `"file"`.
  *
- * Writes use the `wx` flag (fail-if-exists) so a same-millisecond
- * collision — e.g. two bridge instances writing into a shared inbox, or
- * a user re-sending the same file twice in quick succession — never
- * silently overwrites an existing file. On `EEXIST` we re-stamp and
- * retry with a fresh timestamp.
+ * Writes use the `wx` flag (fail-if-exists) so a collision — two
+ * bridge instances sharing an inbox, the user re-sending the same
+ * file twice in quick succession, a stubbed/frozen clock — never
+ * silently overwrites an existing file. On `EEXIST` we keep the
+ * original timestamp and bump a deterministic numeric suffix
+ * (`-1-`, `-2-`, …) capped at `INBOX_MAX_COLLISION_RETRIES`.
+ *
+ * Reserved-name corner case (Windows `CON`, `PRN`, `NUL`, `COM1`, …):
+ * Windows matches reserved device names against the basename exactly
+ * (case-insensitive, with or without extension). Because we always
+ * prefix the saved name with a timestamp like `2026-05-21T...Z-`,
+ * the basename is never one of those reserved tokens, so no extra
+ * handling is needed here.
  */
 export async function saveToInbox(
   buffer: Buffer,
@@ -232,24 +254,31 @@ export async function saveToInbox(
   inboxDir: string,
 ): Promise<string> {
   await fsp.mkdir(inboxDir, { recursive: true, mode: INBOX_DIR_MODE });
+  // Best-effort chmod the dir in case it pre-existed with looser
+  // permissions — mkdir's {mode} only applies to dirs we just created.
+  await fsp.chmod(inboxDir, INBOX_DIR_MODE).catch(() => {});
+
   const safeBase = sanitizeFilename(fileName);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 
   for (let attempt = 0; attempt < INBOX_MAX_COLLISION_RETRIES; attempt++) {
     // attempt 0 → "stamp-name"; subsequent retries → "stamp-N-name".
-    // Putting the counter ahead of the user-supplied name keeps the file
-    // extension at the tail (so OS open-by-extension still works) and
-    // guarantees a fresh path even when the wall clock hasn't ticked
-    // between retries (super-fast disk, stubbed time, etc.).
+    // Putting the counter ahead of the user-supplied name keeps the
+    // file extension at the tail (so OS open-by-extension still works)
+    // and guarantees a fresh path even when the wall clock hasn't
+    // ticked between retries (super-fast disk, stubbed time, etc.).
     const suffix = attempt === 0 ? "" : `-${attempt}`;
     const target = path.resolve(inboxDir, `${stamp}${suffix}-${safeBase}`);
     try {
       await fsp.writeFile(target, buffer, { flag: "wx", mode: INBOX_FILE_MODE });
+      // Best-effort chmod the file too — belt-and-braces against
+      // a future change to a less minimal {mode} above.
+      await fsp.chmod(target, INBOX_FILE_MODE).catch(() => {});
       return target;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      // Yield to the event loop between retries so we don't starve the
-      // bridge's poll loop on a pathological hot loop.
+      // Yield to the event loop between retries so we don't starve
+      // the bridge's poll loop on a pathological hot loop.
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
   }
@@ -261,7 +290,14 @@ export async function saveToInbox(
 function sanitizeFilename(name: string): string {
   // Drop any path separators a remote sender might have included.
   const tail = name.split(/[\\/]/).pop() ?? "";
-  // Replace control chars and reserved chars; leave Unicode alone.
-  const cleaned = tail.replace(/[\x00-\x1f<>:"/\\|?*]/g, "_").replace(/^\.+/, "_");
+  // Replace ASCII control chars and Windows-reserved chars. Then:
+  //   - leading dots → `_` (no hidden files / no path-walk-via-dot)
+  //   - trailing dots and spaces → `_` (Windows silently trims them
+  //     when creating files, which would make the path we return to
+  //     the agent differ from the on-disk name).
+  const cleaned = tail
+    .replace(/[\x00-\x1f<>:"/\\|?*]/g, "_")
+    .replace(/^\.+/, "_")
+    .replace(/[. ]+$/, "_");
   return cleaned.length > 0 ? cleaned : "file";
 }
