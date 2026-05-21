@@ -274,6 +274,7 @@ async function main(): Promise<void> {
   const config = defaultConfig({ instance: args.instance });
 
   // Load config file if specified
+  let configFileSetInboxDir = false;
   if (args.configFile) {
     const fileConfig = loadConfigFile(args.configFile);
     Object.assign(config.wechat, fileConfig.wechat ?? {});
@@ -281,6 +282,16 @@ async function main(): Promise<void> {
     Object.assign(config.agents, fileConfig.agents ?? {});
     Object.assign(config.session, fileConfig.session ?? {});
     Object.assign(config.daemon, fileConfig.daemon ?? {});
+    // Track whether the user explicitly set inboxDir so we don't
+    // overwrite their choice with a re-derived default below. We check
+    // before Object.assign because checking after can't distinguish
+    // "user wrote inboxDir: null to disable" from "user didn't write it".
+    if (
+      fileConfig.storage &&
+      Object.prototype.hasOwnProperty.call(fileConfig.storage, "inboxDir")
+    ) {
+      configFileSetInboxDir = true;
+    }
     Object.assign(config.storage, fileConfig.storage ?? {});
   }
 
@@ -291,21 +302,28 @@ async function main(): Promise<void> {
     config.storage.dir = defaultStorageDir(args.instance);
     config.daemon.logFile = path.join(config.storage.dir, "wechat-acp.log");
     config.daemon.pidFile = path.join(config.storage.dir, "daemon.pid");
-    // Re-derive the default inbox to the new storage root. A later
-    // --inbox-dir / --no-inbox below still wins.
-    config.storage.inboxDir = path.join(config.storage.dir, "inbox");
   }
 
-  // Inbox overrides. --no-inbox wins over --inbox-dir if both are given,
-  // since "disable" is the more explicit intent.
+  // Resolve the final inbox directory. Precedence (highest first):
+  //   1. --no-inbox            (explicit disable)
+  //   2. --inbox-dir <path>    (explicit CLI override)
+  //   3. config.storage.inboxDir explicitly set in the config file
+  //      (relative paths are resolved against cwd)
+  //   4. Default: <storage.dir>/inbox, re-derived from whatever the
+  //      final storage.dir is. This is what keeps a config file that
+  //      only sets storage.dir consistent with the documented
+  //      "default: <storage.dir>/inbox", and also covers the
+  //      --instance case for free.
   if (args.disableInbox) {
     config.storage.inboxDir = null;
   } else if (args.inboxDir) {
     config.storage.inboxDir = path.resolve(args.inboxDir);
-  } else if (config.storage.inboxDir && !path.isAbsolute(config.storage.inboxDir)) {
-    // A config-file-supplied relative path is resolved against cwd at
-    // startup so the agent always sees an absolute path in prompts.
-    config.storage.inboxDir = path.resolve(config.storage.inboxDir);
+  } else if (configFileSetInboxDir) {
+    if (config.storage.inboxDir && !path.isAbsolute(config.storage.inboxDir)) {
+      config.storage.inboxDir = path.resolve(config.storage.inboxDir);
+    }
+  } else {
+    config.storage.inboxDir = path.join(config.storage.dir, "inbox");
   }
 
   // Handle subcommands
