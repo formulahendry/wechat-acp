@@ -2,7 +2,7 @@
  * Inbound adapter: convert WeChat messages to ACP ContentBlock[].
  */
 
-import fs from "node:fs";
+import fsp from "node:fs/promises";
 import path from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { WeixinMessage, MessageItem } from "../weixin/types.js";
@@ -136,7 +136,7 @@ async function convertMediaItem(
       } as acp.ContentBlock;
     }
 
-    return { type: "text", text: buildBinaryFileText(fileName, buffer, inboxDir, log) };
+    return { type: "text", text: await buildBinaryFileText(fileName, buffer, inboxDir, log) };
   }
 
   if (item.type === MessageItemType.VOICE && item.voice_item?.media) {
@@ -180,23 +180,34 @@ function guessMimeType(name: string): string {
  * legacy size-only notice (with a log line for diagnostics) — the agent
  * still gets *something* and the message poll loop is not blocked.
  */
-function buildBinaryFileText(
+async function buildBinaryFileText(
   fileName: string,
   buffer: Buffer,
   inboxDir: string | null,
   log: (msg: string) => void,
-): string {
+): Promise<string> {
   if (!inboxDir) {
     return `[Received file: ${fileName}, ${buffer.length} bytes]`;
   }
   try {
-    const savedPath = saveToInbox(buffer, fileName, inboxDir);
+    const savedPath = await saveToInbox(buffer, fileName, inboxDir);
     return `[Received file: ${fileName} (${buffer.length} bytes) \u2014 saved to: ${savedPath}]`;
   } catch (err) {
     log(`Failed to save received file "${fileName}" to inbox: ${String(err)}`);
     return `[Received file: ${fileName}, ${buffer.length} bytes]`;
   }
 }
+
+// Permissions: 0o600 on the file and 0o700 on the inbox dir so that on
+// multi-user POSIX systems received files (which often contain personal
+// info: IDs, contracts, photos…) aren't readable by other local users.
+// Ignored by Windows but harmless there.
+const INBOX_DIR_MODE = 0o700;
+const INBOX_FILE_MODE = 0o600;
+// Safety cap on the EEXIST retry loop. Each retry uses a new millisecond
+// timestamp, so colliding past this count is essentially impossible — the
+// cap is just a belt-and-braces guard against an unforeseen infinite loop.
+const INBOX_MAX_COLLISION_RETRIES = 100;
 
 /**
  * Write `buffer` into `inboxDir` and return the absolute path.
@@ -208,18 +219,43 @@ function buildBinaryFileText(
  *     control chars, leading dots) with `_`, while preserving Unicode
  *     (so Chinese filenames stay readable),
  *   - if the sanitized name is empty, it falls back to `"file"`.
+ *
+ * Writes use the `wx` flag (fail-if-exists) so a same-millisecond
+ * collision — e.g. two bridge instances writing into a shared inbox, or
+ * a user re-sending the same file twice in quick succession — never
+ * silently overwrites an existing file. On `EEXIST` we re-stamp and
+ * retry with a fresh timestamp.
  */
-export function saveToInbox(
+export async function saveToInbox(
   buffer: Buffer,
   fileName: string,
   inboxDir: string,
-): string {
-  fs.mkdirSync(inboxDir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+): Promise<string> {
+  await fsp.mkdir(inboxDir, { recursive: true, mode: INBOX_DIR_MODE });
   const safeBase = sanitizeFilename(fileName);
-  const target = path.resolve(inboxDir, `${stamp}-${safeBase}`);
-  fs.writeFileSync(target, buffer);
-  return target;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+
+  for (let attempt = 0; attempt < INBOX_MAX_COLLISION_RETRIES; attempt++) {
+    // attempt 0 → "stamp-name"; subsequent retries → "stamp-N-name".
+    // Putting the counter ahead of the user-supplied name keeps the file
+    // extension at the tail (so OS open-by-extension still works) and
+    // guarantees a fresh path even when the wall clock hasn't ticked
+    // between retries (super-fast disk, stubbed time, etc.).
+    const suffix = attempt === 0 ? "" : `-${attempt}`;
+    const target = path.resolve(inboxDir, `${stamp}${suffix}-${safeBase}`);
+    try {
+      await fsp.writeFile(target, buffer, { flag: "wx", mode: INBOX_FILE_MODE });
+      return target;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // Yield to the event loop between retries so we don't starve the
+      // bridge's poll loop on a pathological hot loop.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  }
+  throw new Error(
+    `saveToInbox: exhausted ${INBOX_MAX_COLLISION_RETRIES} collision retries for ${safeBase}`,
+  );
 }
 
 function sanitizeFilename(name: string): string {
