@@ -60,6 +60,13 @@ Options:
                       scoped to ~/.wechat-acp/instances/<name>/.
                       Lets you run multiple bridges side by side, each with
                       its own WeChat account and project cwd.
+  --inbox-dir <path>  Directory to save binary files received from WeChat
+                      (default: <storage.dir>/inbox). The agent sees the
+                      saved absolute path in the prompt so it can read the
+                      file directly.
+  --no-inbox          Disable saving received files. The agent will only
+                      see a "[Received file: name, N bytes]" notice and
+                      will not be able to read the file content.
   --idle-timeout <m>  Session idle timeout in minutes (default: 1440)
                       Use 0 to disable idle cleanup
   --max-sessions <n>  Max concurrent user sessions (default: 10)
@@ -77,6 +84,8 @@ function parseArgs(argv: string[]): {
   daemon: boolean;
   configFile?: string;
   instance?: string;
+  inboxDir?: string;
+  disableInbox: boolean;
   idleTimeout?: number;
   maxSessions?: number;
   hideThoughts: boolean;
@@ -86,6 +95,7 @@ function parseArgs(argv: string[]): {
   const result = {
     forceLogin: false,
     daemon: false,
+    disableInbox: false,
     hideThoughts: false,
     verbose: false,
     help: false,
@@ -120,6 +130,12 @@ function parseArgs(argv: string[]): {
         break;
       case "--instance":
         result.instance = args[++i];
+        break;
+      case "--inbox-dir":
+        result.inboxDir = args[++i];
+        break;
+      case "--no-inbox":
+        result.disableInbox = true;
         break;
       case "--idle-timeout":
         result.idleTimeout = parseInt(args[++i], 10);
@@ -275,6 +291,21 @@ async function main(): Promise<void> {
     config.storage.dir = defaultStorageDir(args.instance);
     config.daemon.logFile = path.join(config.storage.dir, "wechat-acp.log");
     config.daemon.pidFile = path.join(config.storage.dir, "daemon.pid");
+    // Re-derive the default inbox to the new storage root. A later
+    // --inbox-dir / --no-inbox below still wins.
+    config.storage.inboxDir = path.join(config.storage.dir, "inbox");
+  }
+
+  // Inbox overrides. --no-inbox wins over --inbox-dir if both are given,
+  // since "disable" is the more explicit intent.
+  if (args.disableInbox) {
+    config.storage.inboxDir = null;
+  } else if (args.inboxDir) {
+    config.storage.inboxDir = path.resolve(args.inboxDir);
+  } else if (config.storage.inboxDir && !path.isAbsolute(config.storage.inboxDir)) {
+    // A config-file-supplied relative path is resolved against cwd at
+    // startup so the agent always sees an absolute path in prompts.
+    config.storage.inboxDir = path.resolve(config.storage.inboxDir);
   }
 
   // Handle subcommands

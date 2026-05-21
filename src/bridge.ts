@@ -144,6 +144,7 @@ export class WeChatAcpBridge {
       msg,
       this.config.wechat.cdnBaseUrl,
       this.log,
+      this.config.storage.inboxDir,
     );
 
     await this.sessionManager!.enqueue(userId, { prompt, contextToken });

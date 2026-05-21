@@ -83,6 +83,8 @@ Options:
 - `--instance <name>`: run as a named, isolated instance. See "Running multiple instances" below.
 - `--idle-timeout <minutes>`: session idle timeout, default `1440` (use `0` for unlimited)
 - `--max-sessions <count>`: maximum concurrent user sessions, default `10`
+- `--inbox-dir <dir>`: directory where received binary files are saved (default: `<storage.dir>/inbox`). The agent sees the absolute saved path in the prompt and can read the file directly.
+- `--no-inbox`: do not save received files; the agent only sees a size notice.
 - `--hide-thoughts`: do not forward agent thinking to WeChat (default: forwarded)
 - `-h, --help`: show help
 
@@ -165,6 +167,29 @@ You can also override or add agent presets:
 - Typing indicators are sent when supported by the WeChat API.
 - Sessions are cleaned up after inactivity (set `idleTimeoutMs` to `0` to disable idle cleanup).
 
+## Receiving files
+
+When a WeChat user sends a binary file (PDF, image, audio recording exported as a file, ZIP, etc.), `wechat-acp` downloads and decrypts it from the WeChat CDN, then **saves it to disk** so the ACP agent can read it by absolute path. The agent receives a text block like:
+
+```
+[Received file: 报告.pdf (484067 bytes) — saved to: /Users/me/.wechat-acp/inbox/2026-05-21T09-29-12-492Z-报告.pdf]
+```
+
+Any ACP agent that can read local files (Copilot CLI, Claude Code, Codex, …) can then open the saved path with its normal file tools.
+
+Defaults:
+
+- Save location: `<storage.dir>/inbox`, i.e. `~/.wechat-acp/inbox` by default, or `~/.wechat-acp/instances/<name>/inbox` when `--instance` is used.
+- Filename: `<ISO-timestamp>-<original-name>`, with filesystem-unsafe characters in the original name replaced by `_`. Unicode (including Chinese) filenames are preserved.
+- No automatic cleanup. Files live until you delete them; agents may reference them long after the WeChat message arrives. Periodically run e.g. `find ~/.wechat-acp/inbox -mtime +30 -delete` if you want to prune.
+
+Overrides:
+
+- `--inbox-dir /some/path` — write files somewhere else (handy if you want them under iCloud Drive, a project folder, etc.)
+- `--no-inbox` — keep the pre-0.3 behavior where the file buffer is dropped after download and the agent only sees `[Received file: name, N bytes]`.
+
+Text-typed files (`.md`, `.json`, source code, …) and images keep their previous behavior: their content is embedded inline in the prompt as a `resource` / `image` block, no disk write needed.
+
 ## Storage
 
 By default, runtime files are stored under:
@@ -180,6 +205,7 @@ This directory is used for:
 - daemon log file
 - sync state
 - anonymous telemetry install id (`telemetry-id`, see Telemetry section)
+- `inbox/` — binary files received from WeChat (see "Receiving files"); disable with `--no-inbox` or relocate with `--inbox-dir`
 
 When `--instance <name>` is used, the same files live under `~/.wechat-acp/instances/<name>/` instead, fully isolated from other instances.
 

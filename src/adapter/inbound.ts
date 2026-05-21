@@ -3,6 +3,7 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
 import type * as acp from "@agentclientprotocol/sdk";
 import type { WeixinMessage, MessageItem } from "../weixin/types.js";
 import { MessageItemType } from "../weixin/types.js";
@@ -55,6 +56,7 @@ export async function weixinMessageToPrompt(
   msg: WeixinMessage,
   cdnBaseUrl: string,
   log: (msg: string) => void,
+  inboxDir?: string | null,
 ): Promise<acp.ContentBlock[]> {
   const blocks: acp.ContentBlock[] = [];
 
@@ -68,7 +70,7 @@ export async function weixinMessageToPrompt(
   const mediaItem = findMediaItem(msg.item_list);
   if (mediaItem) {
     try {
-      const attached = await convertMediaItem(mediaItem, cdnBaseUrl, log);
+      const attached = await convertMediaItem(mediaItem, cdnBaseUrl, log, inboxDir ?? null);
       if (attached) blocks.push(attached);
     } catch (err) {
       log(`Media download failed, skipping: ${String(err)}`);
@@ -94,6 +96,7 @@ async function convertMediaItem(
   item: MessageItem,
   cdnBaseUrl: string,
   log: (msg: string) => void,
+  inboxDir: string | null,
 ): Promise<acp.ContentBlock | null> {
   if (item.type === MessageItemType.IMAGE && item.image_item?.media) {
     const media = item.image_item.media;
@@ -133,7 +136,7 @@ async function convertMediaItem(
       } as acp.ContentBlock;
     }
 
-    return { type: "text", text: `[Received file: ${fileName}, ${buffer.length} bytes]` };
+    return { type: "text", text: buildBinaryFileText(fileName, buffer, inboxDir, log) };
   }
 
   if (item.type === MessageItemType.VOICE && item.voice_item?.media) {
@@ -167,4 +170,62 @@ function guessMimeType(name: string): string {
     yaml: "text/yaml", yml: "text/yaml", csv: "text/csv",
   };
   return map[ext] ?? "text/plain";
+}
+
+/**
+ * Build the text block describing a received binary file.
+ *
+ * When `inboxDir` is set, the buffer is persisted to disk so the agent
+ * can read it by path. On any save failure we silently fall back to the
+ * legacy size-only notice (with a log line for diagnostics) — the agent
+ * still gets *something* and the message poll loop is not blocked.
+ */
+function buildBinaryFileText(
+  fileName: string,
+  buffer: Buffer,
+  inboxDir: string | null,
+  log: (msg: string) => void,
+): string {
+  if (!inboxDir) {
+    return `[Received file: ${fileName}, ${buffer.length} bytes]`;
+  }
+  try {
+    const savedPath = saveToInbox(buffer, fileName, inboxDir);
+    return `[Received file: ${fileName} (${buffer.length} bytes) \u2014 saved to: ${savedPath}]`;
+  } catch (err) {
+    log(`Failed to save received file "${fileName}" to inbox: ${String(err)}`);
+    return `[Received file: ${fileName}, ${buffer.length} bytes]`;
+  }
+}
+
+/**
+ * Write `buffer` into `inboxDir` and return the absolute path.
+ *
+ * Filename convention: `${ISO-timestamp}-${safeName}`, where
+ *   - the timestamp uses ISO 8601 with colons replaced by dashes so the
+ *     name is valid on Windows/macOS/Linux,
+ *   - `safeName` replaces filesystem-unsafe characters (`/`, `\`, ASCII
+ *     control chars, leading dots) with `_`, while preserving Unicode
+ *     (so Chinese filenames stay readable),
+ *   - if the sanitized name is empty, it falls back to `"file"`.
+ */
+export function saveToInbox(
+  buffer: Buffer,
+  fileName: string,
+  inboxDir: string,
+): string {
+  fs.mkdirSync(inboxDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safeBase = sanitizeFilename(fileName);
+  const target = path.resolve(inboxDir, `${stamp}-${safeBase}`);
+  fs.writeFileSync(target, buffer);
+  return target;
+}
+
+function sanitizeFilename(name: string): string {
+  // Drop any path separators a remote sender might have included.
+  const tail = name.split(/[\\/]/).pop() ?? "";
+  // Replace control chars and reserved chars; leave Unicode alone.
+  const cleaned = tail.replace(/[\x00-\x1f<>:"/\\|?*]/g, "_").replace(/^\.+/, "_");
+  return cleaned.length > 0 ? cleaned : "file";
 }

@@ -88,6 +88,15 @@ export interface WeChatAcpConfig {
   storage: {
     dir: string;
     instance?: string;
+    /**
+     * Directory where incoming binary files received from WeChat are
+     * persisted so the agent can read them by path. Set to `null` to
+     * disable saving (matches pre-0.3 behavior, where the file buffer
+     * was dropped after download). Unset (`undefined`) is treated the
+     * same as `null` by the bridge so existing library users that
+     * construct `WeChatAcpConfig` without this field keep working.
+     */
+    inboxDir?: string | null;
   };
 }
 
@@ -145,6 +154,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
     storage: {
       dir: storageDir,
       instance,
+      inboxDir: path.join(storageDir, "inbox"),
     },
   };
 }
