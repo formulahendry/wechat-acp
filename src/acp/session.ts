@@ -41,6 +41,22 @@ export interface SessionManagerOpts {
   sendTyping: (userId: string, contextToken: string) => Promise<void>;
 }
 
+function formatUnknownError(err: unknown): string {
+  if (err instanceof Error) {
+    return err.stack ?? err.message;
+  }
+
+  if (typeof err === "object" && err !== null) {
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return Object.prototype.toString.call(err);
+    }
+  }
+
+  return String(err);
+}
+
 export class SessionManager {
   private sessions = new Map<string, UserSession>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
@@ -203,7 +219,8 @@ export class SessionManager {
             await this.opts.onReply(session.userId, pending.contextToken, replyText);
           }
         } catch (err) {
-          this.opts.log(`[${session.userId}] Agent prompt error: ${String(err)}`);
+          const errorText = formatUnknownError(err);
+          this.opts.log(`[${session.userId}] Agent prompt error: ${errorText}`);
 
           trackException(err, "prompt");
           trackEvent("prompt.completed", {
@@ -227,7 +244,7 @@ export class SessionManager {
             await this.opts.onReply(
               session.userId,
               pending.contextToken,
-              `⚠️ Agent error: ${String(err)}`,
+              `⚠️ Agent error: ${errorText}`,
             );
           } catch {
             // best effort
