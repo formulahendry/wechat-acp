@@ -29,13 +29,13 @@ Bridge WeChat direct messages to any ACP-compatible AI agent.
 Start with a built-in agent preset:
 
 ```bash
-npx wechat-acp --agent copilot
+npx -y wechat-acp@latest --agent copilot
 ```
 
 Or use a raw custom command:
 
 ```bash
-npx wechat-acp --agent "npx my-agent --acp"
+npx -y wechat-acp@latest --agent "npx my-agent --acp"
 ```
 
 On first run, the bridge will:
@@ -91,10 +91,10 @@ Options:
 Examples:
 
 ```bash
-npx wechat-acp --agent copilot
-npx wechat-acp --agent claude --cwd D:\code\project
-npx wechat-acp --agent "npx @github/copilot --acp"
-npx wechat-acp --agent gemini --daemon
+npx -y wechat-acp@latest --agent copilot
+npx -y wechat-acp@latest --agent claude --cwd D:\code\project
+npx -y wechat-acp@latest --agent "npx @github/copilot --acp"
+npx -y wechat-acp@latest --agent gemini --daemon
 ```
 
 ## Running multiple instances
@@ -105,10 +105,10 @@ Typical setup: WeChat account 1 drives project A, WeChat account 2 drives projec
 
 ```bash
 # Terminal 1: scan with WeChat account 1
-npx wechat-acp --instance projA --agent copilot --cwd D:\code\repo-a
+npx -y wechat-acp@latest --instance projA --agent copilot --cwd D:\code\repo-a
 
 # Terminal 2: scan with WeChat account 2
-npx wechat-acp --instance projB --agent copilot --cwd D:\code\repo-b
+npx -y wechat-acp@latest --instance projB --agent copilot --cwd D:\code\repo-b
 ```
 
 The first run of each instance prints its own QR code. Tokens are saved per instance, so subsequent runs reuse them independently.
@@ -116,8 +116,8 @@ The first run of each instance prints its own QR code. Tokens are saved per inst
 The `stop` and `status` subcommands also honor `--instance`:
 
 ```bash
-npx wechat-acp status --instance projA
-npx wechat-acp stop   --instance projB
+npx -y wechat-acp@latest status --instance projA
+npx -y wechat-acp@latest stop   --instance projB
 ```
 
 Without `--instance`, paths fall back to `~/.wechat-acp/` exactly as before, so existing installs are unaffected.
