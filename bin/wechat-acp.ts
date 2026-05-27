@@ -111,24 +111,10 @@ async function handleInject(
     contextToken: args.injectContextToken,
   });
 
-  const pidFile = config.daemon.pidFile;
-  let daemonRunning = false;
-  if (fs.existsSync(pidFile)) {
-    const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
-    try {
-      process.kill(pid, 0);
-      daemonRunning = true;
-    } catch {
-      daemonRunning = false;
-    }
-  }
-
   console.log(`Queued injection ${job.id}`);
   console.log(`Target: ${job.target}`);
   console.log(`File: ${filePath}`);
-  if (!daemonRunning) {
-    console.log("Daemon does not appear to be running; the message will be processed after it starts.");
-  }
+  console.log("It will be processed by any running wechat-acp instance using the same storage directory.");
 }
 
 function parseArgs(argv: string[]): {
