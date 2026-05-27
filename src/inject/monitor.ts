@@ -102,6 +102,9 @@ export class InjectionMonitor {
   }
 
   private async ensureDirs(): Promise<void> {
+    await fs.mkdir(this.opts.injectDir, { recursive: true, mode: INJECT_DIR_MODE });
+    await fs.chmod(this.opts.injectDir, INJECT_DIR_MODE).catch(() => {});
+
     const dirs = [
       this.dir("pending"),
       this.dir("processing"),

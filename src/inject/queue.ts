@@ -27,6 +27,8 @@ export async function queueInjectedMessage(
   }
 
   const pendingDir = path.join(params.injectDir, "pending");
+  await fs.mkdir(params.injectDir, { recursive: true, mode: INJECT_DIR_MODE });
+  await fs.chmod(params.injectDir, INJECT_DIR_MODE).catch(() => {});
   await fs.mkdir(pendingDir, { recursive: true, mode: INJECT_DIR_MODE });
   await fs.chmod(pendingDir, INJECT_DIR_MODE).catch(() => {});
 

@@ -175,10 +175,10 @@ export class SessionManager {
   }
 
   private async processQueue(session: UserSession): Promise<void> {
-    let completionError: unknown;
     try {
       while (session.queue.length > 0 && !this.aborted) {
         const pending = session.queue.shift()!;
+        let completionError: unknown;
 
         // Keep the ACP client instance stable because the connection is bound to it.
         session.client.updateCallbacks({
@@ -251,7 +251,6 @@ export class SessionManager {
           if (session.agentInfo.process.killed || session.agentInfo.process.exitCode !== null) {
             this.opts.log(`[${session.userId}] Agent process died, removing session`);
             this.sessions.delete(session.userId);
-            pending.completion?.reject(err);
             return;
           }
 
