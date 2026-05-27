@@ -14,6 +14,10 @@ import { trackEvent, trackException, hashUserId } from "../telemetry/index.js";
 export interface PendingMessage {
   prompt: acp.ContentBlock[];
   contextToken: string;
+  completion?: {
+    resolve: () => void;
+    reject: (err: unknown) => void;
+  };
 }
 
 export interface UserSession {
@@ -99,6 +103,18 @@ export class SessionManager {
     }
   }
 
+  async enqueueAndWait(
+    userId: string,
+    message: Omit<PendingMessage, "completion">,
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      this.enqueue(userId, {
+        ...message,
+        completion: { resolve, reject },
+      }).catch(reject);
+    });
+  }
+
   getSession(userId: string): UserSession | undefined {
     return this.sessions.get(userId);
   }
@@ -159,6 +175,7 @@ export class SessionManager {
   }
 
   private async processQueue(session: UserSession): Promise<void> {
+    let completionError: unknown;
     try {
       while (session.queue.length > 0 && !this.aborted) {
         const pending = session.queue.shift()!;
@@ -213,6 +230,7 @@ export class SessionManager {
             await this.opts.onReply(session.userId, pending.contextToken, replyText);
           }
         } catch (err) {
+          completionError = err;
           this.opts.log(`[${session.userId}] Agent prompt error: ${String(err)}`);
 
           trackException(err, "prompt", hashUserId(session.userId));
@@ -233,6 +251,7 @@ export class SessionManager {
           if (session.agentInfo.process.killed || session.agentInfo.process.exitCode !== null) {
             this.opts.log(`[${session.userId}] Agent process died, removing session`);
             this.sessions.delete(session.userId);
+            pending.completion?.reject(err);
             return;
           }
 
@@ -245,6 +264,14 @@ export class SessionManager {
             );
           } catch {
             // best effort
+          }
+        } finally {
+          if (pending.completion) {
+            if (completionError) {
+              pending.completion.reject(completionError);
+            } else {
+              pending.completion.resolve();
+            }
           }
         }
       }

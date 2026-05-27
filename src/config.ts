@@ -89,6 +89,8 @@ export interface WeChatAcpConfig {
   storage: {
     dir: string;
     instance?: string;
+    stateFile?: string;
+    injectDir?: string;
     /**
      * Directory where incoming binary files received from WeChat are
      * persisted so the agent can read them by path. Set to `null` to
@@ -156,6 +158,8 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
     storage: {
       dir: storageDir,
       instance,
+      stateFile: path.join(storageDir, "state.json"),
+      injectDir: path.join(storageDir, "inject"),
       inboxDir: path.join(storageDir, "inbox"),
     },
   };

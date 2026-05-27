@@ -5,6 +5,7 @@
  * One bridge = one WeChat bot account → many users → many agent sessions.
  */
 
+import type * as acp from "@agentclientprotocol/sdk";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
 import { sendTextMessage, splitText } from "./weixin/send.js";
@@ -15,6 +16,9 @@ import { SessionManager } from "./acp/session.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
 import { formatForWeChat } from "./adapter/outbound.js";
 import type { WeChatAcpConfig } from "./config.js";
+import { InjectionMonitor } from "./inject/monitor.js";
+import type { InjectedMessage } from "./inject/types.js";
+import { resolveUserTarget, updateLastActiveUser } from "./storage/state.js";
 import { trackEvent, trackException, hashUserId } from "./telemetry/index.js";
 
 const TEXT_CHUNK_LIMIT = 4000;
@@ -23,7 +27,9 @@ export class WeChatAcpBridge {
   private config: WeChatAcpConfig;
   private abortController = new AbortController();
   private sessionManager: SessionManager | null = null;
+  private injectionMonitor: InjectionMonitor | null = null;
   private tokenData: TokenData | null = null;
+  private stateUpdate = Promise.resolve();
   // Per-user typing ticket cache
   private typingTickets = new Map<string, { ticket: string; expiresAt: number }>();
   private log: (msg: string) => void;
@@ -92,6 +98,16 @@ export class WeChatAcpBridge {
     });
     this.sessionManager.start();
 
+    if (this.config.storage.injectDir && this.config.storage.stateFile) {
+      this.injectionMonitor = new InjectionMonitor({
+        injectDir: this.config.storage.injectDir,
+        log: this.log,
+        onMessage: (job) => this.enqueueInjectedMessage(job),
+      });
+      await this.injectionMonitor.start();
+      this.log(`Injection queue: ${this.config.storage.injectDir}`);
+    }
+
     // 3. Start monitor loop
     this.log("Starting message polling...");
     await startMonitor({
@@ -107,6 +123,7 @@ export class WeChatAcpBridge {
   async stop(): Promise<void> {
     this.log("Stopping bridge...");
     this.abortController.abort();
+    this.injectionMonitor?.stop();
     await this.sessionManager?.stop();
     this.log("Bridge stopped");
   }
@@ -123,6 +140,7 @@ export class WeChatAcpBridge {
     if (!userId || !contextToken) return;
 
     this.log(`Message from ${userId}: ${this.previewMessage(msg)}`);
+    this.rememberActiveUser(userId, contextToken);
 
     trackEvent(
       "message.received",
@@ -153,6 +171,39 @@ export class WeChatAcpBridge {
     );
 
     await this.sessionManager!.enqueue(userId, { prompt, contextToken });
+  }
+
+  private async enqueueInjectedMessage(job: InjectedMessage): Promise<void> {
+    if (!this.sessionManager || !this.config.storage.stateFile) {
+      throw new Error("Bridge is not ready to process injected messages");
+    }
+
+    const target = await resolveUserTarget(this.config.storage.stateFile, job.target, job.contextToken);
+    const prompt: acp.ContentBlock[] = [{ type: "text", text: job.text }];
+    this.log(`[inject] enqueue ${job.id} for ${target.userId}`);
+    trackEvent(
+      "message.injected",
+      {
+        userIdHash: hashUserId(target.userId),
+        target: job.target,
+      },
+      hashUserId(target.userId),
+    );
+    await this.sessionManager.enqueueAndWait(target.userId, {
+      prompt,
+      contextToken: target.contextToken,
+    });
+  }
+
+  private rememberActiveUser(userId: string, contextToken: string): void {
+    if (!this.config.storage.stateFile) return;
+    this.stateUpdate = this.stateUpdate
+      .catch(() => {})
+      .then(() => updateLastActiveUser(this.config.storage.stateFile!, userId, contextToken));
+    this.stateUpdate.catch((err) => {
+      this.log(`Failed to persist last active user: ${String(err)}`);
+      trackException(err, "state", hashUserId(userId));
+    });
   }
 
   private async sendReply(userId: string, contextToken: string, text: string): Promise<void> {

@@ -10,6 +10,7 @@
  *   wechat-acp --agent "claude code" --daemon
  *   wechat-acp stop
  *   wechat-acp status
+ *   wechat-acp inject --text "今日 AI 资讯"
  */
 
 import fs from "node:fs";
@@ -25,6 +26,8 @@ import {
   validateInstanceName,
 } from "../src/config.js";
 import type { WeChatAcpConfig } from "../src/config.js";
+import { queueInjectedMessage } from "../src/inject/queue.js";
+import { DEFAULT_INJECTION_TARGET } from "../src/inject/types.js";
 import {
   initTelemetry,
   trackEvent,
@@ -44,6 +47,7 @@ wechat-acp v${packageJson.version} — Bridge WeChat to any ACP-compatible AI ag
 Usage:
   wechat-acp --agent <preset|command>  [options]
   wechat-acp agents                        List built-in agent presets
+  wechat-acp inject --text <text>          Inject a local message into the daemon
   wechat-acp stop                          Stop a running daemon
   wechat-acp status                        Check daemon status
 
@@ -72,10 +76,59 @@ Options:
   --max-sessions <n>  Max concurrent user sessions (default: 10)
   --hide-thoughts     Do not forward agent thinking to WeChat (default: forwarded)
   --hide-diffs        Do not forward ACP file diffs to WeChat (default: forwarded)
+  --text <text>       Message text for "inject"
+  --file <path>       Read injected message text from a file
+  --to <target>       Injection target (default: ${DEFAULT_INJECTION_TARGET})
+  --context-token <t> Override stored context token for "inject"
   -v, --verbose       Verbose logging
   -V, --version       Print version and exit
   -h, --help          Show this help
 `);
+}
+
+async function handleInject(
+  config: WeChatAcpConfig,
+  args: ReturnType<typeof parseArgs>,
+): Promise<void> {
+  if (!config.storage.injectDir) {
+    throw new Error("storage.injectDir is not configured");
+  }
+  if (!args.injectText && !args.injectFile) {
+    throw new Error('inject requires --text <text> or --file <path>');
+  }
+  if (args.injectText && args.injectFile) {
+    throw new Error("inject accepts only one of --text or --file");
+  }
+
+  const text = args.injectFile
+    ? fs.readFileSync(path.resolve(args.injectFile), "utf-8")
+    : args.injectText!;
+
+  const { job, filePath } = await queueInjectedMessage({
+    injectDir: config.storage.injectDir,
+    text,
+    target: args.injectTo,
+    contextToken: args.injectContextToken,
+  });
+
+  const pidFile = config.daemon.pidFile;
+  let daemonRunning = false;
+  if (fs.existsSync(pidFile)) {
+    const pid = parseInt(fs.readFileSync(pidFile, "utf-8").trim(), 10);
+    try {
+      process.kill(pid, 0);
+      daemonRunning = true;
+    } catch {
+      daemonRunning = false;
+    }
+  }
+
+  console.log(`Queued injection ${job.id}`);
+  console.log(`Target: ${job.target}`);
+  console.log(`File: ${filePath}`);
+  if (!daemonRunning) {
+    console.log("Daemon does not appear to be running; the message will be processed after it starts.");
+  }
 }
 
 function parseArgs(argv: string[]): {
@@ -90,6 +143,10 @@ function parseArgs(argv: string[]): {
   disableInbox: boolean;
   idleTimeout?: number;
   maxSessions?: number;
+  injectText?: string;
+  injectFile?: string;
+  injectTo?: string;
+  injectContextToken?: string;
   hideThoughts: boolean;
   hideDiffs: boolean;
   verbose: boolean;
@@ -148,6 +205,18 @@ function parseArgs(argv: string[]): {
         break;
       case "--max-sessions":
         result.maxSessions = parseInt(args[++i], 10);
+        break;
+      case "--text":
+        result.injectText = args[++i];
+        break;
+      case "--file":
+        result.injectFile = args[++i];
+        break;
+      case "--to":
+        result.injectTo = args[++i];
+        break;
+      case "--context-token":
+        result.injectContextToken = args[++i];
         break;
       case "--hide-thoughts":
         result.hideThoughts = true;
@@ -293,6 +362,8 @@ async function main(): Promise<void> {
 
   // Load config file if specified
   let configFileSetInboxDir = false;
+  let configFileSetStateFile = false;
+  let configFileSetInjectDir = false;
   if (args.configFile) {
     const fileConfig = loadConfigFile(args.configFile);
     Object.assign(config.wechat, fileConfig.wechat ?? {});
@@ -309,6 +380,18 @@ async function main(): Promise<void> {
       Object.prototype.hasOwnProperty.call(fileConfig.storage, "inboxDir")
     ) {
       configFileSetInboxDir = true;
+    }
+    if (
+      fileConfig.storage &&
+      Object.prototype.hasOwnProperty.call(fileConfig.storage, "stateFile")
+    ) {
+      configFileSetStateFile = true;
+    }
+    if (
+      fileConfig.storage &&
+      Object.prototype.hasOwnProperty.call(fileConfig.storage, "injectDir")
+    ) {
+      configFileSetInjectDir = true;
     }
     Object.assign(config.storage, fileConfig.storage ?? {});
   }
@@ -344,9 +427,29 @@ async function main(): Promise<void> {
     config.storage.inboxDir = path.join(config.storage.dir, "inbox");
   }
 
+  if (configFileSetStateFile) {
+    if (config.storage.stateFile && !path.isAbsolute(config.storage.stateFile)) {
+      config.storage.stateFile = path.resolve(config.storage.stateFile);
+    }
+  } else {
+    config.storage.stateFile = path.join(config.storage.dir, "state.json");
+  }
+
+  if (configFileSetInjectDir) {
+    if (config.storage.injectDir && !path.isAbsolute(config.storage.injectDir)) {
+      config.storage.injectDir = path.resolve(config.storage.injectDir);
+    }
+  } else {
+    config.storage.injectDir = path.join(config.storage.dir, "inject");
+  }
+
   // Handle subcommands
   if (args.command === "agents") {
     handleAgents(config);
+    return;
+  }
+  if (args.command === "inject") {
+    await handleInject(config, args);
     return;
   }
   if (args.command === "stop") {
