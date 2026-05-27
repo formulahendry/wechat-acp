@@ -252,6 +252,7 @@ export class SessionManager {
           // Check if agent died
           if (session.agentInfo.process.killed || session.agentInfo.process.exitCode !== null) {
             this.opts.log(`[${session.userId}] Agent process died, removing session`);
+            this.rejectQueuedCompletions(session, err);
             this.sessions.delete(session.userId);
             return;
           }

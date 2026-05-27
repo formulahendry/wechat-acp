@@ -125,6 +125,10 @@ export class WeChatAcpBridge {
     this.abortController.abort();
     this.injectionMonitor?.stop();
     await this.sessionManager?.stop();
+    await this.stateUpdate.catch((err) => {
+      this.log(`Failed to flush state before stop: ${String(err)}`);
+      trackException(err, "state");
+    });
     this.log("Bridge stopped");
   }
 
