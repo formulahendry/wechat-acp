@@ -14,6 +14,7 @@ export interface InjectionMonitorOpts {
 export class InjectionMonitor {
   private timer: ReturnType<typeof setInterval> | null = null;
   private processing = false;
+  private currentProcessing: Promise<void> | null = null;
   private stopped = false;
 
   constructor(private readonly opts: InjectionMonitorOpts) {}
@@ -30,17 +31,32 @@ export class InjectionMonitor {
     this.timer.unref();
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    await this.currentProcessing;
   }
 
   private async processPending(): Promise<void> {
-    if (this.processing || this.stopped) return;
+    if (this.processing) {
+      await this.currentProcessing;
+      return;
+    }
+    if (this.stopped) return;
     this.processing = true;
+    this.currentProcessing = this.drainPending();
+    try {
+      await this.currentProcessing;
+    } finally {
+      this.processing = false;
+      this.currentProcessing = null;
+    }
+  }
+
+  private async drainPending(): Promise<void> {
     try {
       const pendingDir = this.dir("pending");
       const files = (await fs.readdir(pendingDir).catch((err) => {
@@ -54,8 +70,8 @@ export class InjectionMonitor {
         if (this.stopped) break;
         await this.processFile(file);
       }
-    } finally {
-      this.processing = false;
+    } catch (err) {
+      throw err;
     }
   }
 
@@ -95,7 +111,14 @@ export class InjectionMonitor {
 
   private async readJob(filePath: string): Promise<InjectedMessage> {
     const parsed = JSON.parse(await fs.readFile(filePath, "utf-8")) as Partial<InjectedMessage>;
-    if (!parsed.id || !parsed.createdAt || !parsed.target || !parsed.text || parsed.source !== "cli") {
+    if (
+      typeof parsed.id !== "string" ||
+      typeof parsed.createdAt !== "string" ||
+      typeof parsed.target !== "string" ||
+      typeof parsed.text !== "string" ||
+      parsed.source !== "cli" ||
+      (parsed.contextToken !== undefined && typeof parsed.contextToken !== "string")
+    ) {
       throw new Error(`Invalid injected message file: ${filePath}`);
     }
     return parsed as InjectedMessage;

@@ -123,11 +123,11 @@ export class WeChatAcpBridge {
   async stop(): Promise<void> {
     this.log("Stopping bridge...");
     this.abortController.abort();
-    this.injectionMonitor?.stop();
+    await this.injectionMonitor?.stop();
     await this.sessionManager?.stop();
     await this.stateUpdate.catch((err) => {
       this.log(`Failed to flush state before stop: ${String(err)}`);
-      trackException(err, "state");
+      trackException(sanitizeStateError(err), "state");
     });
     this.log("Bridge stopped");
   }
@@ -206,7 +206,7 @@ export class WeChatAcpBridge {
       .then(() => updateLastActiveUser(this.config.storage.stateFile!, userId, contextToken));
     this.stateUpdate.catch((err) => {
       this.log(`Failed to persist last active user: ${String(err)}`);
-      trackException(err, "state", hashUserId(userId));
+      trackException(sanitizeStateError(err), "state", hashUserId(userId));
     });
   }
 
@@ -327,4 +327,14 @@ export class WeChatAcpBridge {
     }
     return "empty";
   }
+}
+
+function sanitizeStateError(err: unknown): Error {
+  const code = typeof err === "object" && err !== null && "code" in err
+    ? String((err as { code?: unknown }).code)
+    : "";
+  const sanitized = new Error(code ? `State persistence failed (${code})` : "State persistence failed");
+  sanitized.name = err instanceof Error ? err.name : "Error";
+  sanitized.stack = undefined;
+  return sanitized;
 }
