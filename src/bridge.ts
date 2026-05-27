@@ -185,7 +185,7 @@ export class WeChatAcpBridge {
       "message.injected",
       {
         userIdHash: hashUserId(target.userId),
-        target: job.target,
+        targetKind: job.target === "last-active-user" ? "last-active-user" : "explicit",
       },
       hashUserId(target.userId),
     );

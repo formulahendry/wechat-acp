@@ -71,6 +71,7 @@ export class SessionManager {
     // Kill all agent processes
     for (const [userId, session] of this.sessions) {
       this.opts.log(`Stopping session for ${userId}`);
+      this.rejectQueuedCompletions(session, new Error("Session stopped before queued message was processed"));
       killAgent(session.agentInfo.process);
     }
     this.sessions.clear();
@@ -158,6 +159,7 @@ export class SessionManager {
       const s = this.sessions.get(userId);
       if (s && s.agentInfo.process === agentInfo.process) {
         this.opts.log(`Agent process for ${userId} exited, removing session`);
+        this.rejectQueuedCompletions(s, new Error("Agent process exited before queued message was processed"));
         this.sessions.delete(userId);
       }
     });
@@ -304,8 +306,17 @@ export class SessionManager {
     if (oldest) {
       this.opts.log(`Evicting oldest idle session: ${oldest.userId}`);
       const session = this.sessions.get(oldest.userId);
-      if (session) killAgent(session.agentInfo.process);
-      this.sessions.delete(oldest.userId);
+      if (session) {
+        this.rejectQueuedCompletions(session, new Error("Session evicted before queued message was processed"));
+        killAgent(session.agentInfo.process);
+        this.sessions.delete(oldest.userId);
+      }
+    }
+  }
+
+  private rejectQueuedCompletions(session: UserSession, err: unknown): void {
+    for (const pending of session.queue.splice(0)) {
+      pending.completion?.reject(err);
     }
   }
 }
