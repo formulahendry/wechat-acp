@@ -78,6 +78,10 @@ export class SessionManager {
   }
 
   async enqueue(userId: string, message: PendingMessage): Promise<void> {
+    if (this.aborted) {
+      throw new Error("Session manager is stopped");
+    }
+
     let session = this.sessions.get(userId);
 
     if (!session) {
