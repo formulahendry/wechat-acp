@@ -25,6 +25,7 @@ export interface UserSession {
   contextToken: string;
   client: WeChatAcpClient;
   agentInfo: AgentProcessInfo;
+  configOptions: acp.SessionConfigOption[];
   queue: PendingMessage[];
   processing: boolean;
   lastActivity: number;
@@ -124,6 +125,31 @@ export class SessionManager {
     return this.sessions.get(userId);
   }
 
+  getSessionConfigOptions(userId: string): acp.SessionConfigOption[] | undefined {
+    return this.sessions.get(userId)?.configOptions;
+  }
+
+  async setSessionConfigOption(
+    userId: string,
+    configId: string,
+    value: string | boolean,
+  ): Promise<acp.SessionConfigOption[]> {
+    const session = this.sessions.get(userId);
+    if (!session) {
+      throw new Error("No active ACP session for this chat yet. Send a normal message first.");
+    }
+
+    session.lastActivity = Date.now();
+    const response = await session.agentInfo.connection.setSessionConfigOption(
+      typeof value === "boolean"
+        ? { sessionId: session.agentInfo.sessionId, configId, type: "boolean", value }
+        : { sessionId: session.agentInfo.sessionId, configId, value },
+    );
+    session.configOptions = response.configOptions;
+    session.agentInfo.configOptions = response.configOptions;
+    return response.configOptions;
+  }
+
   get activeCount(): number {
     return this.sessions.size;
   }
@@ -134,6 +160,12 @@ export class SessionManager {
     const client = new WeChatAcpClient({
       sendTyping: () => this.opts.sendTyping(userId, contextToken),
       onThoughtFlush: (text) => this.opts.onReply(userId, contextToken, text),
+      onConfigOptionsUpdate: (configOptions) => {
+        const session = this.sessions.get(userId);
+        if (!session || session.client !== client) return;
+        session.configOptions = configOptions;
+        session.agentInfo.configOptions = configOptions;
+      },
       log: (msg) => this.opts.log(`[${userId}] ${msg}`),
       showThoughts: this.opts.showThoughts,
       showDiffs: this.opts.showDiffs ?? true,
@@ -173,6 +205,7 @@ export class SessionManager {
       contextToken,
       client,
       agentInfo,
+      configOptions: agentInfo.configOptions,
       queue: [],
       processing: false,
       lastActivity: Date.now(),

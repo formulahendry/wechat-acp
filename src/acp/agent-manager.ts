@@ -13,6 +13,7 @@ export interface AgentProcessInfo {
   process: ChildProcess;
   connection: acp.ClientSideConnection;
   sessionId: string;
+  configOptions: acp.SessionConfigOption[];
 }
 
 export async function spawnAgent(params: {
@@ -90,6 +91,7 @@ export async function spawnAgent(params: {
     process: proc,
     connection,
     sessionId: sessionResult.sessionId,
+    configOptions: sessionResult.configOptions ?? [],
   };
 }
 

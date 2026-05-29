@@ -12,6 +12,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 export interface WeChatAcpClientOpts {
   sendTyping: () => Promise<void>;
   onThoughtFlush: (text: string) => Promise<void>;
+  onConfigOptionsUpdate?: (configOptions: acp.SessionConfigOption[]) => void;
   log: (msg: string) => void;
   showThoughts: boolean;
   showDiffs?: boolean;
@@ -120,6 +121,11 @@ export class WeChatAcpClient implements acp.Client {
           this.opts.log(`[plan]\n${items}`);
         }
         await this.maybeSendTyping();
+        break;
+
+      case "config_option_update":
+        this.opts.onConfigOptionsUpdate?.(update.configOptions);
+        this.opts.log(`[config] ${update.configOptions.length} option(s) updated`);
         break;
     }
   }

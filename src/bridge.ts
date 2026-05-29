@@ -14,13 +14,13 @@ import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
 import { SessionManager } from "./acp/session.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
-import { formatForWeChat } from "./adapter/outbound.js";
 import type { WeChatAcpConfig } from "./config.js";
 import { InjectionMonitor } from "./inject/monitor.js";
 import type { InjectedMessage } from "./inject/types.js";
 import { resolveUserTarget, updateLastActiveUser } from "./storage/state.js";
 import { trackEvent, trackException, hashUserId } from "./telemetry/index.js";
 
+const ACP_CONFIG_COMMAND = "/acp-config";
 const TEXT_CHUNK_LIMIT = 4000;
 
 export class WeChatAcpBridge {
@@ -155,6 +155,15 @@ export class WeChatAcpBridge {
       hashUserId(userId),
     );
 
+    const acpConfigCommand = this.extractAcpConfigCommand(msg);
+    if (acpConfigCommand) {
+      this.handleAcpConfigCommand(acpConfigCommand, userId, contextToken).catch((err) => {
+        this.log(`Failed to handle ACP config command from ${userId}: ${String(err)}`);
+        trackException(err, "command", hashUserId(userId));
+      });
+      return;
+    }
+
     // Convert and enqueue — fire-and-forget (don't block the poll loop)
     this.enqueueMessage(msg, userId, contextToken).catch((err) => {
       this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
@@ -199,6 +208,73 @@ export class WeChatAcpBridge {
     });
   }
 
+  private async handleAcpConfigCommand(
+    command: string,
+    userId: string,
+    contextToken: string,
+  ): Promise<void> {
+    const args = command.trim().split(/\s+/);
+    if (args.length === 1) {
+      const configOptions = this.sessionManager?.getSessionConfigOptions(userId);
+      trackEvent(
+        "command.acp_config.view",
+        {
+          userIdHash: hashUserId(userId),
+          hasSession: !!configOptions,
+          optionCount: configOptions?.length ?? 0,
+        },
+        hashUserId(userId),
+      );
+      await this.sendReply(userId, contextToken, this.formatAcpConfigList(userId));
+      return;
+    }
+
+    if (args[1] === "set") {
+      if (args.length < 4) {
+        await this.sendReply(userId, contextToken, this.formatAcpConfigUsage("Missing configId or value."));
+        return;
+      }
+
+      const configId = args[2]!;
+      const rawValue = args.slice(3).join(" ");
+      try {
+        const resolved = this.resolveAcpConfigValue(userId, configId, rawValue);
+        await this.sessionManager!.setSessionConfigOption(userId, configId, resolved.rawValue);
+        const optionType = this.sessionManager!
+          .getSessionConfigOptions(userId)
+          ?.find((o) => o.id === configId)?.type;
+        trackEvent(
+          "command.acp_config.set",
+          {
+            userIdHash: hashUserId(userId),
+            configId,
+            optionType: optionType ?? "unknown",
+            optionValue: resolved.displayValue,
+          },
+          hashUserId(userId),
+        );
+        await this.sendReply(
+          userId,
+          contextToken,
+          `✅ Updated ACP config: ${configId} = ${resolved.displayValue}\n\n${this.formatAcpConfigList(userId)}`,
+        );
+      } catch (err) {
+        await this.sendReply(
+          userId,
+          contextToken,
+          this.formatAcpConfigUsage(err instanceof Error ? err.message : String(err)),
+        );
+      }
+      return;
+    }
+
+    await this.sendReply(
+      userId,
+      contextToken,
+      this.formatAcpConfigUsage(`Unknown subcommand: ${args[1]}`),
+    );
+  }
+
   private rememberActiveUser(userId: string, contextToken: string): void {
     if (!this.config.storage.stateFile) return;
     this.stateUpdate = this.stateUpdate
@@ -211,8 +287,7 @@ export class WeChatAcpBridge {
   }
 
   private async sendReply(userId: string, contextToken: string, text: string): Promise<void> {
-    const formatted = formatForWeChat(text);
-    const segments = splitText(formatted, TEXT_CHUNK_LIMIT);
+    const segments = splitText(text, TEXT_CHUNK_LIMIT);
     const startedAt = Date.now();
 
     try {
@@ -228,7 +303,7 @@ export class WeChatAcpBridge {
         {
           userIdHash: hashUserId(userId),
           segments: segments.length,
-          chars: formatted.length,
+          chars: text.length,
           durationMs: Date.now() - startedAt,
         },
         hashUserId(userId),
@@ -326,6 +401,180 @@ export class WeChatAcpBridge {
       if (item.type === 5) return "video";
     }
     return "empty";
+  }
+
+  private extractAcpConfigCommand(msg: WeixinMessage): string | null {
+    const items = msg.item_list ?? [];
+    if (items.length !== 1) return null;
+
+    const item = items[0];
+    if (item?.type !== 1 || !item.text_item?.text) return null;
+
+    const text = item.text_item.text.trim();
+    return text === ACP_CONFIG_COMMAND || text.startsWith(`${ACP_CONFIG_COMMAND} `) ? text : null;
+  }
+
+  private formatAcpConfigList(userId: string): string {
+    const configOptions = this.sessionManager?.getSessionConfigOptions(userId);
+    if (!configOptions) {
+      return this.formatAcpConfigUsage(
+        "No active ACP session for this chat yet. Send a normal message first.",
+      );
+    }
+    if (configOptions.length === 0) {
+      return this.formatAcpConfigUsage(
+        "The current ACP agent does not expose any configurable session options.",
+      );
+    }
+
+    const lines: string[] = [];
+    lines.push("⚙️ **ACP Session Config**");
+    lines.push("━━━━━━━━━━━━━━━━");
+
+    for (const option of configOptions) {
+      lines.push("");
+      lines.push(`📌 **${option.name}**  (id: \`${option.id}\`)`);
+      lines.push(`   • Current: ${this.describeCurrentConfigValue(option)}`);
+      if (option.type === "select") {
+        lines.push(`   • Options: ${this.listConfigOptionChoices(option).join(" | ")}`);
+      } else if (option.type === "boolean") {
+        lines.push(`   • Options: true | false`);
+      }
+    }
+
+    lines.push("");
+    lines.push("━━━━━━━━━━━━━━━━");
+    lines.push("💡 **Usage**");
+    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}`);
+    lines.push(`   • Update: ${ACP_CONFIG_COMMAND} set <configId> <value>`);
+    return lines.join("\n");
+  }
+
+  private formatAcpConfigUsage(error?: string): string {
+    const lines: string[] = [];
+    if (error) {
+      lines.push(`⚠️ ${error}`);
+      lines.push("");
+    }
+    lines.push("💡 **Usage**");
+    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}`);
+    lines.push(`   • Update: ${ACP_CONFIG_COMMAND} set <configId> <value>`);
+    return lines.join("\n");
+  }
+
+  private describeCurrentConfigValue(option: acp.SessionConfigOption): string {
+    if (option.type === "boolean") {
+      return option.currentValue ? "true" : "false";
+    }
+
+    const current = this.findConfigOptionChoice(option, option.currentValue);
+    return current ? this.describeConfigChoice(current) : option.currentValue;
+  }
+
+  private listConfigOptionChoices(option: acp.SessionConfigOption): string[] {
+    if (option.type !== "select") return [];
+    return this.flattenSelectOptions(option.options).map((choice) => this.describeConfigChoice(choice));
+  }
+
+  private resolveAcpConfigValue(
+    userId: string,
+    configId: string,
+    rawValue: string,
+  ): { rawValue: string | boolean; displayValue: string } {
+    const configOptions = this.sessionManager?.getSessionConfigOptions(userId);
+    if (!configOptions) {
+      throw new Error("No active ACP session for this chat yet. Send a normal message first.");
+    }
+
+    const option = configOptions.find((candidate) => candidate.id === configId);
+    if (!option) {
+      throw new Error(`Unknown ACP config option: ${configId}`);
+    }
+
+    if (option.type === "boolean") {
+      const normalized = rawValue.trim().toLowerCase();
+      if (["true", "on", "1", "yes"].includes(normalized)) {
+        return { rawValue: true, displayValue: "true" };
+      }
+      if (["false", "off", "0", "no"].includes(normalized)) {
+        return { rawValue: false, displayValue: "false" };
+      }
+      throw new Error(`Invalid boolean value for ${configId}: ${rawValue}`);
+    }
+
+    const candidates = this.flattenSelectOptions(option.options).filter((choice) =>
+      this.configChoiceAliases(choice).has(rawValue.trim().toLowerCase())
+    );
+    if (candidates.length === 0) {
+      throw new Error(
+        `Invalid value for ${configId}: ${rawValue}. Options: ${this.listConfigOptionChoices(option).join(", ")}`,
+      );
+    }
+    if (candidates.length > 1) {
+      throw new Error(`Ambiguous value for ${configId}: ${rawValue}`);
+    }
+
+    const match = candidates[0]!;
+    return {
+      rawValue: match.value,
+      displayValue: this.describeConfigChoice(match),
+    };
+  }
+
+  private flattenSelectOptions(
+    options: acp.SessionConfigSelect["options"],
+  ): acp.SessionConfigSelectOption[] {
+    if (options.length === 0) return [];
+
+    const first = options[0];
+    if (first && "value" in first) {
+      return options as acp.SessionConfigSelectOption[];
+    }
+
+    return (options as acp.SessionConfigSelectGroup[]).flatMap((group) => group.options);
+  }
+
+  private findConfigOptionChoice(
+    option: acp.SessionConfigSelect,
+    rawValue: string,
+  ): acp.SessionConfigSelectOption | undefined {
+    return this.flattenSelectOptions(option.options).find((choice) => choice.value === rawValue);
+  }
+
+  private configChoiceAliases(choice: acp.SessionConfigSelectOption): Set<string> {
+    const aliases = new Set<string>();
+    aliases.add(choice.value.toLowerCase());
+    aliases.add(choice.name.toLowerCase());
+
+    const compactName = choice.name.toLowerCase().replace(/\s+/g, "-");
+    aliases.add(compactName);
+
+    const tail = this.extractConfigValueTail(choice.value);
+    if (tail) aliases.add(tail.toLowerCase());
+
+    return aliases;
+  }
+
+  private describeConfigChoice(choice: acp.SessionConfigSelectOption): string {
+    const tail = this.extractConfigValueTail(choice.value);
+    if (tail && tail.toLowerCase() !== choice.name.toLowerCase()) {
+      return tail;
+    }
+    return choice.value;
+  }
+
+  private extractConfigValueTail(value: string): string {
+    const hashIndex = value.lastIndexOf("#");
+    if (hashIndex >= 0 && hashIndex < value.length - 1) {
+      return value.slice(hashIndex + 1);
+    }
+
+    const slashIndex = value.lastIndexOf("/");
+    if (slashIndex >= 0 && slashIndex < value.length - 1) {
+      return value.slice(slashIndex + 1);
+    }
+
+    return value;
   }
 }
 

@@ -29,6 +29,8 @@ export type EventName =
   | "token.reused"
   | "message.received"
   | "message.injected"
+  | "command.acp_config.view"
+  | "command.acp_config.set"
   | "session.created"
   | "prompt.completed"
   | "reply.sent";
