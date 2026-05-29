@@ -177,6 +177,30 @@ You can also override or add agent presets:
 - Typing indicators are sent when supported by the WeChat API.
 - Sessions are cleaned up after inactivity (set `idleTimeoutMs` to `0` to disable idle cleanup).
 
+## WeChat ACP config command
+
+`wechat-acp` reserves a bridge-level chat command for inspecting and changing ACP session configuration without exposing a UI picker in WeChat:
+
+```text
+/acp-config
+/acp-config set <configId> <value>
+```
+
+Examples:
+
+```text
+/acp-config
+/acp-config set model gpt-5-mini
+/acp-config set mode plan
+/acp-config set reasoning_effort low
+```
+
+Notes:
+
+- The command only works after the WeChat user already has an active ACP session. If not, send a normal message first so the session is created.
+- Available `configId` values come directly from the ACP agent's `configOptions`, so the exact list depends on the configured agent.
+- This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.
+
 ## Injecting messages locally
 
 `wechat-acp inject` lets local automation enqueue a text message for the running daemon. The daemon treats it like an incoming direct message from the target user, sends it to the configured ACP agent, and replies through WeChat.
