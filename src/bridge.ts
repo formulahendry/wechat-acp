@@ -535,9 +535,11 @@ export class WeChatAcpBridge {
   private describeConfigChoice(choice: acp.SessionConfigSelectOption): string {
     const tail = this.extractConfigValueTail(choice.value);
     if (tail && tail.toLowerCase() !== choice.name.toLowerCase()) {
+
       return tail;
     }
     return choice.value;
+  }
   }
 
   private extractConfigValueTail(value: string): string {
