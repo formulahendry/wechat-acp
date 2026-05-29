@@ -332,17 +332,19 @@ npm run dev
 WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 ```
 
-**What is collected** (10 event types only):
+**What is collected** (12 event types only):
 
 - `app.start` / `app.stop` — process lifecycle, agent preset name, daemon flag, uptime
 - `login.success` / `login.failure` / `token.reused` — WeChat login outcomes (no token, no QR URL)
 - `message.received` — message arrived; only the categorical kind (`text` / `image` / `voice` / `file` / `video` / `empty`) and a hashed user id
 - `message.injected` — local injection queued for processing; only target kind (`last-active-user` / `explicit`) and a hashed user id
+- `command.acp_config.view` — `/acp-config` invoked to list options; whether a session exists and the option count
+- `command.acp_config.set` — `/acp-config set` succeeded; `configId`, option type (`select` / `boolean`), and the resolved option value (all from the agent's declared `configOptions`, never the user's raw input)
 - `session.created` — new ACP session opened
 - `prompt.completed` — ACP turn finished; agent preset, stop reason, duration, reply length
 - `reply.sent` — reply pushed back to WeChat; segment count, total length
 
-Plus exception reports for `monitor`, `prompt`, `reply`, `auth`, `agent_spawn`, `enqueue`, and `state` failures.
+Plus exception reports for `monitor`, `prompt`, `reply`, `auth`, `agent_spawn`, `enqueue`, `command`, and `state` failures.
 
 **What is never collected**: message bodies, filenames, voice transcripts, image URLs, login tokens, QR codes, raw agent command strings, environment variables, working directory paths, raw WeChat user IDs.
 

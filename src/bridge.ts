@@ -215,6 +215,16 @@ export class WeChatAcpBridge {
   ): Promise<void> {
     const args = command.trim().split(/\s+/);
     if (args.length === 1) {
+      const configOptions = this.sessionManager?.getSessionConfigOptions(userId);
+      trackEvent(
+        "command.acp_config.view",
+        {
+          userIdHash: hashUserId(userId),
+          hasSession: !!configOptions,
+          optionCount: configOptions?.length ?? 0,
+        },
+        hashUserId(userId),
+      );
       await this.sendReply(userId, contextToken, this.formatAcpConfigList(userId));
       return;
     }
@@ -230,6 +240,19 @@ export class WeChatAcpBridge {
       try {
         const resolved = this.resolveAcpConfigValue(userId, configId, rawValue);
         await this.sessionManager!.setSessionConfigOption(userId, configId, resolved.rawValue);
+        const optionType = this.sessionManager!
+          .getSessionConfigOptions(userId)
+          ?.find((o) => o.id === configId)?.type;
+        trackEvent(
+          "command.acp_config.set",
+          {
+            userIdHash: hashUserId(userId),
+            configId,
+            optionType: optionType ?? "unknown",
+            optionValue: resolved.displayValue,
+          },
+          hashUserId(userId),
+        );
         await this.sendReply(
           userId,
           contextToken,
@@ -534,12 +557,10 @@ export class WeChatAcpBridge {
 
   private describeConfigChoice(choice: acp.SessionConfigSelectOption): string {
     const tail = this.extractConfigValueTail(choice.value);
-    if (tail && tail.toLowerCase() !== choice.name.toLowerCase()) {
-
+    if (tail && tail.toLowerCase() !== choice.name.toLowerCase()) {
       return tail;
     }
     return choice.value;
-  }
   }
 
   private extractConfigValueTail(value: string): string {
