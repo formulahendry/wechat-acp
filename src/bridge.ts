@@ -14,7 +14,6 @@ import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
 import { SessionManager } from "./acp/session.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
-import { formatForWeChat } from "./adapter/outbound.js";
 import type { WeChatAcpConfig } from "./config.js";
 import { InjectionMonitor } from "./inject/monitor.js";
 import type { InjectedMessage } from "./inject/types.js";
@@ -234,7 +233,7 @@ export class WeChatAcpBridge {
         await this.sendReply(
           userId,
           contextToken,
-          `已更新 ACP 配置：${configId} = ${resolved.displayValue}\n\n${this.formatAcpConfigList(userId)}`,
+          `✅ Updated ACP config: ${configId} = ${resolved.displayValue}\n\n${this.formatAcpConfigList(userId)}`,
         );
       } catch (err) {
         await this.sendReply(
@@ -265,8 +264,7 @@ export class WeChatAcpBridge {
   }
 
   private async sendReply(userId: string, contextToken: string, text: string): Promise<void> {
-    const formatted = formatForWeChat(text);
-    const segments = splitText(formatted, TEXT_CHUNK_LIMIT);
+    const segments = splitText(text, TEXT_CHUNK_LIMIT);
     const startedAt = Date.now();
 
     try {
@@ -282,7 +280,7 @@ export class WeChatAcpBridge {
         {
           userIdHash: hashUserId(userId),
           segments: segments.length,
-          chars: formatted.length,
+          chars: text.length,
           durationMs: Date.now() - startedAt,
         },
         hashUserId(userId),
@@ -406,28 +404,38 @@ export class WeChatAcpBridge {
       );
     }
 
-    const lines = ["ACP session config:"];
+    const lines: string[] = [];
+    lines.push("⚙️ **ACP Session Config**");
+    lines.push("━━━━━━━━━━━━━━━━");
+
     for (const option of configOptions) {
-      lines.push(`- ${option.id} (${option.name}): ${this.describeCurrentConfigValue(option)}`);
+      lines.push("");
+      lines.push(`📌 **${option.name}**  (id: \`${option.id}\`)`);
+      lines.push(`   • Current: ${this.describeCurrentConfigValue(option)}`);
       if (option.type === "select") {
-        lines.push(`  options: ${this.listConfigOptionChoices(option).join(", ")}`);
+        lines.push(`   • Options: ${this.listConfigOptionChoices(option).join(" | ")}`);
+      } else if (option.type === "boolean") {
+        lines.push(`   • Options: true | false`);
       }
     }
 
     lines.push("");
-    lines.push(`Usage: ${ACP_CONFIG_COMMAND}`);
-    lines.push(`       ${ACP_CONFIG_COMMAND} set <configId> <value>`);
+    lines.push("━━━━━━━━━━━━━━━━");
+    lines.push("💡 **Usage**");
+    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}`);
+    lines.push(`   • Update: ${ACP_CONFIG_COMMAND} set <configId> <value>`);
     return lines.join("\n");
   }
 
   private formatAcpConfigUsage(error?: string): string {
-    const lines = [];
+    const lines: string[] = [];
     if (error) {
       lines.push(`⚠️ ${error}`);
       lines.push("");
     }
-    lines.push(`Usage: ${ACP_CONFIG_COMMAND}`);
-    lines.push(`       ${ACP_CONFIG_COMMAND} set <configId> <value>`);
+    lines.push("💡 **Usage**");
+    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}`);
+    lines.push(`   • Update: ${ACP_CONFIG_COMMAND} set <configId> <value>`);
     return lines.join("\n");
   }
 
