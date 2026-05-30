@@ -24,7 +24,20 @@ export class WeChatAcpClient implements acp.Client {
   private thoughtChunks: string[] = [];
   private opts: WeChatAcpClientOpts;
   private lastTypingAt = 0;
+  private producedMessageThisTurn = false;
   private static readonly TYPING_INTERVAL_MS = 5_000;
+  private static readonly SEND_MAX_ATTEMPTS = 3;
+  private static readonly SEND_RETRY_BASE_MS = 300;
+
+  /** Whether the agent emitted any non-empty message content during the current turn. */
+  get hasProducedMessage(): boolean {
+    return this.producedMessageThisTurn;
+  }
+
+  /** Reset per-turn delivery state. Call at the start of each prompt. */
+  newTurn(): void {
+    this.producedMessageThisTurn = false;
+  }
 
   constructor(opts: WeChatAcpClientOpts) {
     this.opts = opts;
@@ -70,6 +83,9 @@ export class WeChatAcpClient implements acp.Client {
         await this.maybeFlushThoughts();
         if (update.content.type === "text") {
           this.chunks.push(update.content.text);
+          if (update.content.text.trim()) {
+            this.producedMessageThisTurn = true;
+          }
         }
         // Throttle typing indicators
         await this.maybeSendTyping();
@@ -111,6 +127,7 @@ export class WeChatAcpClient implements acp.Client {
                 for (const l of diff.newText.split("\n")) lines.push(`+ ${l}`);
               }
               this.chunks.push("\n```diff\n" + lines.join("\n") + "\n```\n");
+              this.producedMessageThisTurn = true;
             }
           }
         }
@@ -169,12 +186,13 @@ export class WeChatAcpClient implements acp.Client {
     if (this.thoughtChunks.length === 0) return;
     const thoughtText = this.thoughtChunks.join("");
     this.thoughtChunks = [];
-    if (thoughtText.trim()) {
-      try {
-        await this.opts.onThoughtFlush(`💭 [Thinking]\n${thoughtText}`);
-      } catch {
-        // best effort
-      }
+    if (!thoughtText.trim()) return;
+    const ok = await this.sendWithRetry(
+      () => this.opts.onThoughtFlush(`💭 [Thinking]\n${thoughtText}`),
+      "thought",
+    );
+    if (!ok) {
+      this.opts.log(`[flush] dropping ${thoughtText.length} chars of thought after retries`);
     }
   }
 
@@ -187,14 +205,45 @@ export class WeChatAcpClient implements acp.Client {
   private async maybeFlushMessage(): Promise<void> {
     if (this.chunks.length === 0) return;
     const text = this.chunks.join("");
-    this.chunks = [];
-    if (text.trim()) {
+    if (!text.trim()) {
+      this.chunks = [];
+      return;
+    }
+    const ok = await this.sendWithRetry(() => this.opts.onMessageFlush(text), "message");
+    if (ok) {
+      this.chunks = [];
+    } else {
+      // Keep the buffer intact so the final flush() returns this text and the
+      // caller (session.ts) re-attempts delivery via onReply, which surfaces
+      // any failure to the user. This prevents the final answer from being
+      // silently dropped while intermediate thoughts were already delivered.
+      this.opts.log(
+        `[flush] message send failed after retries; retaining ${text.length} chars for final flush`,
+      );
+    }
+  }
+
+  /**
+   * Send with bounded retries and linear backoff (`SEND_RETRY_BASE_MS *
+   * attempt`). Returns true on success, false if all attempts failed
+   * (logging each failure so transient WeChat send errors are surfaced
+   * instead of silently swallowed).
+   */
+  private async sendWithRetry(send: () => Promise<void>, label: string): Promise<boolean> {
+    for (let attempt = 1; attempt <= WeChatAcpClient.SEND_MAX_ATTEMPTS; attempt++) {
       try {
-        await this.opts.onMessageFlush(text);
-      } catch {
-        // best effort
+        await send();
+        return true;
+      } catch (err) {
+        this.opts.log(
+          `[flush] ${label} send failed (attempt ${attempt}/${WeChatAcpClient.SEND_MAX_ATTEMPTS}): ${String(err)}`,
+        );
+        if (attempt < WeChatAcpClient.SEND_MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, WeChatAcpClient.SEND_RETRY_BASE_MS * attempt));
+        }
       }
     }
+    return false;
   }
 
   private async maybeSendTyping(): Promise<void> {
