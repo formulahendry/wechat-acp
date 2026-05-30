@@ -23,8 +23,8 @@ import { trackEvent, trackException, hashUserId } from "./telemetry/index.js";
 
 const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
 const ACP_CANCEL_COMMAND = BRIDGE_COMMANDS.acpCancel;
-const BUFFER_START_COMMAND = "/acp-prompt-start";
-const BUFFER_DONE_COMMAND = "/acp-prompt-done";
+const BUFFER_START_COMMAND = BRIDGE_COMMANDS.promptStart;
+const BUFFER_DONE_COMMAND = BRIDGE_COMMANDS.promptDone;
 const TEXT_CHUNK_LIMIT = 4000;
 const BUFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const BUFFER_MAX_BLOCKS = 50;
