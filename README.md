@@ -206,7 +206,7 @@ Two alias styles are supported:
 
 Notes:
 
-- Keys must be a known bridge command (`/acp-config` or `/acp-cancel`).
+- Keys must be a known bridge command (`/acp-config`, `/acp-cancel`, `/acp-prompt-start`, or `/acp-prompt-done`).
 - An alias may not collide with a built-in command name or be mapped to
   more than one command. Invalid configs are rejected at startup.
 

@@ -407,7 +407,7 @@ export class WeChatAcpBridge {
   private handleBufferStart(userId: string, contextToken: string): void {
     if (this.messageBuffers.has(userId)) {
       const buffer = this.messageBuffers.get(userId)!;
-      this.sendReply(userId, contextToken, `📝 Already in buffering mode (${buffer.blocks.length} block(s) collected). Keep sending, then /acp-prompt-done to submit.`).catch((err) => {
+      this.sendReply(userId, contextToken, `📝 Already in buffering mode (${buffer.blocks.length} block(s) collected). Keep sending, then ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)} to submit.`).catch((err) => {
         this.log(`Failed to send buffer active notice to ${userId}: ${String(err)}`);
       });
       return;
@@ -421,7 +421,7 @@ export class WeChatAcpBridge {
       { userIdHash: hashUserId(userId) },
       hashUserId(userId),
     );
-    this.sendReply(userId, contextToken, "📝 Buffering mode started. Send your messages (text, images, files), then send /acp-prompt-done to submit them all at once.").catch((err) => {
+    this.sendReply(userId, contextToken, `📝 Buffering mode started. Send your messages (text, images, files), then send ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)} to submit them all at once.`).catch((err) => {
       this.log(`Failed to send buffer start confirmation to ${userId}: ${String(err)}`);
     });
   }
@@ -429,7 +429,7 @@ export class WeChatAcpBridge {
   private handleBufferDone(userId: string, contextToken: string): Promise<void> {
     const buffer = this.messageBuffers.get(userId);
     if (!buffer) {
-      return this.sendReply(userId, contextToken, "⚠️ Nothing buffered. Send /acp-prompt-start first, then send messages before /acp-prompt-done.");
+      return this.sendReply(userId, contextToken, `⚠️ Nothing buffered. Send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} first, then send messages before ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)}.`);
     }
 
     // Remove from map immediately so new messages during the await
@@ -464,18 +464,18 @@ export class WeChatAcpBridge {
       // A prior append failed (e.g. image download error). The chain
       // already logged/tracked the error. Clear the buffer so the user
       // can start fresh.
-      await this.sendReply(userId, contextToken, "⚠️ A buffered message failed to process. Buffer cleared. Please send /acp-prompt-start to try again.");
+      await this.sendReply(userId, contextToken, `⚠️ A buffered message failed to process. Buffer cleared. Please send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} to try again.`);
       return;
     }
 
     // Check expiry
     if (Date.now() - buffer.lastUpdatedAt > BUFFER_TTL_MS) {
-      await this.sendReply(userId, contextToken, "⚠️ Buffer expired (10 min without activity). Please send /acp-prompt-start to start over.");
+      await this.sendReply(userId, contextToken, `⚠️ Buffer expired (10 min without activity). Please send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} to start over.`);
       return;
     }
 
     if (buffer.blocks.length === 0) {
-      await this.sendReply(userId, contextToken, "⚠️ Buffer is empty. Send some messages before /acp-prompt-done.");
+      await this.sendReply(userId, contextToken, `⚠️ Buffer is empty. Send some messages before ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)}.`);
       return;
     }
 
@@ -513,13 +513,13 @@ export class WeChatAcpBridge {
         if (Date.now() - buffer.lastUpdatedAt > BUFFER_TTL_MS) {
           this.messageBuffers.delete(userId);
           this.log(`Buffer expired for ${userId}`);
-          await this.sendReply(userId, contextToken, "⚠️ Buffering timed out (10 min without activity). Please send /acp-prompt-start again.");
+          await this.sendReply(userId, contextToken, `⚠️ Buffering timed out (10 min without activity). Please send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} again.`);
           return;
         }
 
         // Check block limit
         if (buffer.blocks.length >= BUFFER_MAX_BLOCKS) {
-          await this.sendReply(userId, contextToken, `⚠️ Buffer is full (${BUFFER_MAX_BLOCKS} blocks max). Send /acp-prompt-done to submit what you have.`);
+          await this.sendReply(userId, contextToken, `⚠️ Buffer is full (${BUFFER_MAX_BLOCKS} blocks max). Send ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)} to submit what you have.`);
           return;
         }
 
