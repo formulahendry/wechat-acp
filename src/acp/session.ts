@@ -11,6 +11,27 @@ import { WeChatAcpClient } from "./client.js";
 import { spawnAgent, killAgent, type AgentProcessInfo } from "./agent-manager.js";
 import { trackEvent, trackException, hashUserId } from "../telemetry/index.js";
 
+/**
+ * Build a short, user-friendly notice for a turn that ended without the
+ * agent producing any textual reply. The raw `stopReason` enum is kept
+ * out of the user-facing text (it is still logged) so users see a
+ * meaningful message rather than an internal token like `max_tokens`.
+ */
+function emptyTurnNotice(stopReason: acp.StopReason | undefined): string {
+  switch (stopReason) {
+    case "max_tokens":
+      return "ℹ️ The agent stopped at its output length limit before sending a reply. Try a more specific or shorter request.";
+    case "max_turn_requests":
+      return "ℹ️ The agent reached its tool-call limit before sending a reply. Try again or narrow the task.";
+    case "refusal":
+      return "ℹ️ The agent declined to respond to this request.";
+    case "cancelled":
+      return "ℹ️ The request was cancelled before the agent sent a reply.";
+    default:
+      return "ℹ️ The agent finished without sending a reply. Try rephrasing your request.";
+  }
+}
+
 export interface PendingMessage {
   prompt: acp.ContentBlock[];
   contextToken: string;
@@ -323,7 +344,7 @@ export class SessionManager {
             await this.opts.onReply(
               session.userId,
               pending.contextToken,
-              `(no reply produced — agent stopped: ${String(result.stopReason)})`,
+              emptyTurnNotice(result.stopReason),
             );
           }
         } catch (err) {

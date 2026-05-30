@@ -224,9 +224,10 @@ export class WeChatAcpClient implements acp.Client {
   }
 
   /**
-   * Send with bounded retries and exponential-ish backoff. Returns true on
-   * success, false if all attempts failed (logging each failure so transient
-   * WeChat send errors are surfaced instead of silently swallowed).
+   * Send with bounded retries and linear backoff (`SEND_RETRY_BASE_MS *
+   * attempt`). Returns true on success, false if all attempts failed
+   * (logging each failure so transient WeChat send errors are surfaced
+   * instead of silently swallowed).
    */
   private async sendWithRetry(send: () => Promise<void>, label: string): Promise<boolean> {
     for (let attempt = 1; attempt <= WeChatAcpClient.SEND_MAX_ATTEMPTS; attempt++) {
