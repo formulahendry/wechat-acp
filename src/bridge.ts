@@ -499,8 +499,16 @@ export class WeChatAcpBridge {
     const text = item.text_item.text.trim();
     const names = resolveCommandNames(canonical, this.config.commandAliases);
     for (const name of names) {
-      if (text === name || text.startsWith(`${name} `)) {
-        return text;
+      // Exact match → normalize to the canonical command with no arguments.
+      // This is the only matching mode for bare-phrase aliases (no leading
+      // "/"), e.g. a voice-transcribed "取消", which must match the whole
+      // message to avoid false positives.
+      if (text === name) return canonical;
+      // Slash-prefixed names (the canonical command and "/"-style aliases)
+      // also support trailing arguments. Replace the matched name with the
+      // canonical command so handlers always see a single, stable token.
+      if (name.startsWith("/") && text.startsWith(`${name} `)) {
+        return canonical + text.slice(name.length);
       }
     }
     return null;

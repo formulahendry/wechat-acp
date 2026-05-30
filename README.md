@@ -179,7 +179,7 @@ command to one or more custom aliases via the `commandAliases` config map:
 ```json
 {
   "commandAliases": {
-    "/acp-cancel": ["/cancel", "/取消"],
+    "/acp-cancel": ["/cancel", "/取消", "取消"],
     "/acp-config": ["/config", "/设置"]
   }
 }
@@ -193,10 +193,20 @@ With this config:
   `/设置 set <configId> <value>` works like `/acp-config set ...`.
 - The original built-in names always keep working as a fallback.
 
+Two alias styles are supported:
+
+- **Slash aliases** (start with `/`, e.g. `/cancel`) behave like the
+  built-in commands: they match the command token and may be followed by
+  arguments (`/cancel all`). They must not contain whitespace.
+- **Bare-phrase aliases** (no leading `/`, e.g. `取消`) match only when
+  they equal the *entire* message. This is handy for WeChat voice input,
+  where saying `/取消` out loud feels unnatural — a transcribed `取消`
+  triggers the command. Because they require an exact full-message match,
+  they take no arguments.
+
 Notes:
 
 - Keys must be a known bridge command (`/acp-config` or `/acp-cancel`).
-- Each alias must start with `/` and contain no whitespace.
 - An alias may not collide with a built-in command name or be mapped to
   more than one command. Invalid configs are rejected at startup.
 

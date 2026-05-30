@@ -298,10 +298,18 @@ export function resolveCommandNames(
 }
 
 /**
- * Validate a `commandAliases` map. Aliases must be non-empty strings that
- * start with `/` and contain no whitespace (whitespace would break
- * command/argument parsing). Throws an `Error` describing the first
- * problem found.
+ * Validate a `commandAliases` map. Each key must be a known bridge
+ * command (see {@link BRIDGE_COMMANDS}). Aliases must be non-empty
+ * strings. Two alias styles are supported:
+ *
+ *  - Slash aliases (start with `/`) work like the built-in commands:
+ *    they match the command token and may be followed by arguments, so
+ *    they must not contain whitespace.
+ *  - Bare-phrase aliases (no leading `/`) match only when they equal the
+ *    entire message — useful for voice input (e.g. "取消"). They may
+ *    contain spaces.
+ *
+ * Throws an `Error` describing the first problem found.
  */
 export function validateCommandAliases(aliases: Record<string, string[]> | undefined): void {
   if (aliases === undefined) return;
@@ -327,11 +335,10 @@ export function validateCommandAliases(aliases: Record<string, string[]> | undef
         throw new Error(`commandAliases[${JSON.stringify(canonical)}] contains an empty alias.`);
       }
       const trimmed = alias.trim();
-      if (!trimmed.startsWith("/")) {
-        throw new Error(`commandAliases: alias ${JSON.stringify(trimmed)} must start with "/".`);
-      }
-      if (/\s/.test(trimmed)) {
-        throw new Error(`commandAliases: alias ${JSON.stringify(trimmed)} must not contain whitespace.`);
+      if (trimmed.startsWith("/") && /\s/.test(trimmed)) {
+        throw new Error(
+          `commandAliases: slash alias ${JSON.stringify(trimmed)} must not contain whitespace.`,
+        );
       }
       if (knownCommands.has(trimmed) && trimmed !== canonical) {
         throw new Error(
