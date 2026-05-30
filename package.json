@@ -23,7 +23,8 @@
     "build": "tsc",
     "prepack": "npm run build",
     "start": "node dist/bin/wechat-acp.js",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "node --import tsx/esm --test tests/**/*.ts"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.16.1",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "tsx": "^4.22.3",
     "typescript": "^5.5.0"
   },
   "engines": {

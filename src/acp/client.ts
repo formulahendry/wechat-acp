@@ -209,14 +209,19 @@ export class WeChatAcpClient implements acp.Client {
       this.chunks = [];
       return;
     }
+    // Clear the buffer synchronously BEFORE awaiting the send so that any
+    // concurrent sessionUpdate calls (the ACP SDK fires notifications without
+    // awaiting handlers) see an empty buffer and skip the flush instead of
+    // re-sending the same text. New chunks arriving during the send will be
+    // appended to the now-empty array and flushed at the next boundary.
+    this.chunks = [];
     const ok = await this.sendWithRetry(() => this.opts.onMessageFlush(text), "message");
-    if (ok) {
-      this.chunks = [];
-    } else {
-      // Keep the buffer intact so the final flush() returns this text and the
-      // caller (session.ts) re-attempts delivery via onReply, which surfaces
-      // any failure to the user. This prevents the final answer from being
-      // silently dropped while intermediate thoughts were already delivered.
+    if (!ok) {
+      // Send failed after all retries. Prepend the unsent text back so the
+      // final flush() returns it and session.ts re-attempts via onReply (which
+      // surfaces failure to the user). Any new chunks appended during the
+      // failed send attempts are preserved after the restored text.
+      this.chunks = [text, ...this.chunks];
       this.opts.log(
         `[flush] message send failed after retries; retaining ${text.length} chars for final flush`,
       );
