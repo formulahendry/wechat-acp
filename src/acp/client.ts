@@ -12,6 +12,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 export interface WeChatAcpClientOpts {
   sendTyping: () => Promise<void>;
   onThoughtFlush: (text: string) => Promise<void>;
+  onMessageFlush: (text: string) => Promise<void>;
   onConfigOptionsUpdate?: (configOptions: acp.SessionConfigOption[]) => void;
   log: (msg: string) => void;
   showThoughts: boolean;
@@ -29,11 +30,16 @@ export class WeChatAcpClient implements acp.Client {
     this.opts = opts;
   }
 
-  updateCallbacks(callbacks: { sendTyping: () => Promise<void>; onThoughtFlush: (text: string) => Promise<void> }): void {
+  updateCallbacks(callbacks: {
+    sendTyping: () => Promise<void>;
+    onThoughtFlush: (text: string) => Promise<void>;
+    onMessageFlush: (text: string) => Promise<void>;
+  }): void {
     this.opts = {
       ...this.opts,
       sendTyping: callbacks.sendTyping,
       onThoughtFlush: callbacks.onThoughtFlush,
+      onMessageFlush: callbacks.onMessageFlush,
     };
   }
 
@@ -71,11 +77,13 @@ export class WeChatAcpClient implements acp.Client {
 
       case "tool_call":
         await this.maybeFlushThoughts();
+        await this.maybeFlushMessage();
         this.opts.log(`[tool] ${update.title} (${update.status})`);
         await this.maybeSendTyping();
         break;
 
       case "agent_thought_chunk":
+        await this.maybeFlushMessage();
         if (update.content.type === "text") {
           const text = update.content.text;
           this.opts.log(`[thought] ${text.length > 80 ? text.substring(0, 80) + "..." : text}`);
@@ -164,6 +172,25 @@ export class WeChatAcpClient implements acp.Client {
     if (thoughtText.trim()) {
       try {
         await this.opts.onThoughtFlush(`💭 [Thinking]\n${thoughtText}`);
+      } catch {
+        // best effort
+      }
+    }
+  }
+
+  /**
+   * Stream the buffered agent message (and any embedded diffs) as its own
+   * WeChat reply. Called at thought/tool_call boundaries so multi-step turns
+   * surface narrative segments in order; the final segment is still returned
+   * by `flush()` so the caller can append stop-reason suffixes.
+   */
+  private async maybeFlushMessage(): Promise<void> {
+    if (this.chunks.length === 0) return;
+    const text = this.chunks.join("");
+    this.chunks = [];
+    if (text.trim()) {
+      try {
+        await this.opts.onMessageFlush(text);
       } catch {
         // best effort
       }

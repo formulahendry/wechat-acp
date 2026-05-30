@@ -203,6 +203,7 @@ export class SessionManager {
     const client = new WeChatAcpClient({
       sendTyping: () => this.opts.sendTyping(userId, contextToken),
       onThoughtFlush: (text) => this.opts.onReply(userId, contextToken, text),
+      onMessageFlush: (text) => this.opts.onReply(userId, contextToken, text),
       onConfigOptionsUpdate: (configOptions) => {
         const session = this.sessions.get(userId);
         if (!session || session.client !== client) return;
@@ -266,6 +267,7 @@ export class SessionManager {
         session.client.updateCallbacks({
           sendTyping: () => this.opts.sendTyping(session.userId, pending.contextToken),
           onThoughtFlush: (text) => this.opts.onReply(session.userId, pending.contextToken, text),
+          onMessageFlush: (text) => this.opts.onReply(session.userId, pending.contextToken, text),
         });
 
         // Reset chunks for the new turn
