@@ -260,6 +260,29 @@ Behavior:
 - This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.
 - You can give this command your own aliases via `commandAliases` (see [Customizing bridge command names](#customizing-bridge-command-names-aliases)).
 
+## Multi-part message buffering
+
+WeChat does not allow sending images, files, and text in a single message. To work around this, the bridge provides a buffering mode that collects multiple messages and sends them to the agent as one combined request:
+
+```text
+/acp-prompt-start
+/acp-prompt-done
+```
+
+Usage:
+
+1. Send `/acp-prompt-start` to enter buffering mode. The bridge replies with a confirmation.
+2. Send any number of messages (text, images, files) in any order. These are collected locally and **not** forwarded to the agent.
+3. Send `/acp-prompt-done` to flush the buffer. All collected content is combined into a single agent request.
+
+This avoids triggering multiple agent turns (and multiple replies) when a user needs to send mixed content.
+
+- If `/acp-prompt-done` is sent with nothing buffered, the bridge replies with a warning and no agent request is made.
+- If `/acp-prompt-start` is sent while already buffering, the bridge reminds the user and keeps the existing buffer.
+- Buffering is per-user and held in memory. It does not persist across bridge restarts.
+- Buffers expire after 10 minutes of inactivity. A maximum of 50 content blocks can be collected per buffer.
+- This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.
+
 ## Injecting messages locally
 
 `wechat-acp inject` lets local automation enqueue a text message for the running daemon. The daemon treats it like an incoming direct message from the target user, sends it to the configured ACP agent, and replies through WeChat.
@@ -391,7 +414,7 @@ npm run dev
 WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 ```
 
-**What is collected** (13 event types only):
+**What is collected** (15 event types only):
 
 - `app.start` / `app.stop` — process lifecycle, agent preset name, daemon flag, uptime
 - `login.success` / `login.failure` / `token.reused` — WeChat login outcomes (no token, no QR URL)
@@ -400,11 +423,13 @@ WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 - `command.acp_config.view` — `/acp-config` invoked to list options; whether a session exists and the option count
 - `command.acp_config.set` — `/acp-config set` succeeded; `configId`, option type (`select` / `boolean`), and the resolved option value (all from the agent's declared `configOptions`, never the user's raw input)
 - `command.acp_cancel` — `/acp-cancel` invoked; whether the queue was drained, whether an in-flight turn was actually cancelled, and how many queued messages were dropped
+- `command.buffer_start` — `/acp-prompt-start` invoked to enter buffering mode
+- `command.buffer_done` — `/acp-prompt-done` invoked to flush buffer; number of content blocks collected
 - `session.created` — new ACP session opened
 - `prompt.completed` — ACP turn finished; agent preset, stop reason, duration, reply length
 - `reply.sent` — reply pushed back to WeChat; segment count, total length
 
-Plus exception reports for `monitor`, `prompt`, `reply`, `auth`, `agent_spawn`, `enqueue`, `command`, and `state` failures.
+Plus exception reports for `monitor`, `prompt`, `reply`, `auth`, `agent_spawn`, `enqueue`, `buffer`, `command`, and `state` failures.
 
 **What is never collected**: message bodies, filenames, voice transcripts, image URLs, login tokens, QR codes, raw agent command strings, environment variables, working directory paths, raw WeChat user IDs.
 

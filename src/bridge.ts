@@ -23,7 +23,11 @@ import { trackEvent, trackException, hashUserId } from "./telemetry/index.js";
 
 const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
 const ACP_CANCEL_COMMAND = BRIDGE_COMMANDS.acpCancel;
+const BUFFER_START_COMMAND = "/acp-prompt-start";
+const BUFFER_DONE_COMMAND = "/acp-prompt-done";
 const TEXT_CHUNK_LIMIT = 4000;
+const BUFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const BUFFER_MAX_BLOCKS = 50;
 
 export class WeChatAcpBridge {
   private config: WeChatAcpConfig;
@@ -34,6 +38,20 @@ export class WeChatAcpBridge {
   private stateUpdate = Promise.resolve();
   // Per-user typing ticket cache
   private typingTickets = new Map<string, { ticket: string; expiresAt: number }>();
+  // Per-user message buffer for /acp-prompt-start.../acp-prompt-done multi-part compose
+  private messageBuffers = new Map<string, {
+    blocks: acp.ContentBlock[];
+    contextToken: string;
+    pending: Promise<void>;
+    lastUpdatedAt: number;
+  }>();
+  // Per-user expiry timers for buffer cleanup
+  private bufferTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Users currently flushing their buffer (between /done and enqueue).
+  // Maps userId to a promise that resolves when the flush completes, so
+  // messages arriving during the flush wait for the buffered prompt to
+  // enqueue first, preserving turn order.
+  private bufferFlushing = new Map<string, Promise<void>>();
   private log: (msg: string) => void;
 
   constructor(config: WeChatAcpConfig, log?: (msg: string) => void) {
@@ -175,8 +193,33 @@ export class WeChatAcpBridge {
       return;
     }
 
+    // /acp-prompt-start — enter buffering mode
+    if (this.isBufferStartCommand(msg)) {
+      this.handleBufferStart(userId, contextToken);
+      return;
+    }
+
+    // /acp-prompt-done — flush buffer and send to agent
+    if (this.isBufferDoneCommand(msg)) {
+      this.handleBufferDone(userId, contextToken).catch((err) => {
+        this.log(`Failed to flush message buffer for ${userId}: ${String(err)}`);
+        trackException(err, "buffer", hashUserId(userId));
+      });
+      return;
+    }
+
+    // If user is in buffering mode, append to buffer instead of enqueuing
+    if (this.messageBuffers.has(userId)) {
+      this.appendToBuffer(msg, userId, contextToken);
+      return;
+    }
+
     // Convert and enqueue — fire-and-forget (don't block the poll loop)
-    this.enqueueMessage(msg, userId, contextToken).catch((err) => {
+    const waitForFlush = this.bufferFlushing.get(userId);
+    const enqueue = waitForFlush
+      ? waitForFlush.then(() => this.enqueueMessage(msg, userId, contextToken))
+      : this.enqueueMessage(msg, userId, contextToken);
+    enqueue.catch((err) => {
       this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
       trackException(err, "enqueue", hashUserId(userId));
     });
@@ -351,6 +394,172 @@ export class WeChatAcpBridge {
     lines.push(`   • Cancel current turn:        ${ACP_CANCEL_COMMAND}${this.aliasHint(ACP_CANCEL_COMMAND)}`);
     lines.push(`   • Cancel + drop queued msgs:  ${ACP_CANCEL_COMMAND} all`);
     return lines.join("\n");
+  }
+
+  private isBufferStartCommand(msg: WeixinMessage): boolean {
+    return this.extractBridgeCommand(msg, BUFFER_START_COMMAND) !== null;
+  }
+
+  private isBufferDoneCommand(msg: WeixinMessage): boolean {
+    return this.extractBridgeCommand(msg, BUFFER_DONE_COMMAND) !== null;
+  }
+
+  private handleBufferStart(userId: string, contextToken: string): void {
+    if (this.messageBuffers.has(userId)) {
+      const buffer = this.messageBuffers.get(userId)!;
+      this.sendReply(userId, contextToken, `📝 Already in buffering mode (${buffer.blocks.length} block(s) collected). Keep sending, then /acp-prompt-done to submit.`).catch((err) => {
+        this.log(`Failed to send buffer active notice to ${userId}: ${String(err)}`);
+      });
+      return;
+    }
+
+    this.messageBuffers.set(userId, { blocks: [], contextToken, pending: Promise.resolve(), lastUpdatedAt: Date.now() });
+    this.resetBufferTimer(userId);
+    this.log(`Buffer started for ${userId}`);
+    trackEvent(
+      "command.buffer_start",
+      { userIdHash: hashUserId(userId) },
+      hashUserId(userId),
+    );
+    this.sendReply(userId, contextToken, "📝 Buffering mode started. Send your messages (text, images, files), then send /acp-prompt-done to submit them all at once.").catch((err) => {
+      this.log(`Failed to send buffer start confirmation to ${userId}: ${String(err)}`);
+    });
+  }
+
+  private handleBufferDone(userId: string, contextToken: string): Promise<void> {
+    const buffer = this.messageBuffers.get(userId);
+    if (!buffer) {
+      return this.sendReply(userId, contextToken, "⚠️ Nothing buffered. Send /acp-prompt-start first, then send messages before /acp-prompt-done.");
+    }
+
+    // Remove from map immediately so new messages during the await
+    // are not appended to a stale buffer.
+    const pending = buffer.pending;
+    this.messageBuffers.delete(userId);
+    this.clearBufferTimer(userId);
+
+    // Register a flushing promise so messages arriving during the await
+    // queue behind the buffered prompt, preserving turn order.
+    const flushPromise = this.doFlush(userId, contextToken, buffer, pending);
+    this.bufferFlushing.set(userId, flushPromise);
+    flushPromise.finally(() => {
+      // Only clear if this is still our flush (not a newer one)
+      if (this.bufferFlushing.get(userId) === flushPromise) {
+        this.bufferFlushing.delete(userId);
+      }
+    });
+    return flushPromise;
+  }
+
+  private async doFlush(
+    userId: string,
+    contextToken: string,
+    buffer: { blocks: acp.ContentBlock[]; contextToken: string; pending: Promise<void>; lastUpdatedAt: number },
+    pending: Promise<void>,
+  ): Promise<void> {
+    // Wait for any in-flight appends to finish before reading
+    try {
+      await pending;
+    } catch {
+      // A prior append failed (e.g. image download error). The chain
+      // already logged/tracked the error. Clear the buffer so the user
+      // can start fresh.
+      await this.sendReply(userId, contextToken, "⚠️ A buffered message failed to process. Buffer cleared. Please send /acp-prompt-start to try again.");
+      return;
+    }
+
+    // Check expiry
+    if (Date.now() - buffer.lastUpdatedAt > BUFFER_TTL_MS) {
+      await this.sendReply(userId, contextToken, "⚠️ Buffer expired (10 min without activity). Please send /acp-prompt-start to start over.");
+      return;
+    }
+
+    if (buffer.blocks.length === 0) {
+      await this.sendReply(userId, contextToken, "⚠️ Buffer is empty. Send some messages before /acp-prompt-done.");
+      return;
+    }
+
+    this.log(`Buffer flushed for ${userId}: ${buffer.blocks.length} block(s)`);
+    trackEvent(
+      "command.buffer_done",
+      {
+        userIdHash: hashUserId(userId),
+        blockCount: buffer.blocks.length,
+      },
+      hashUserId(userId),
+    );
+
+    await this.sessionManager!.enqueue(userId, {
+      prompt: buffer.blocks,
+      contextToken: buffer.contextToken,
+    });
+  }
+
+  private appendToBuffer(
+    msg: WeixinMessage,
+    userId: string,
+    contextToken: string,
+  ): void {
+    const buffer = this.messageBuffers.get(userId);
+    if (!buffer) return;
+
+    // Chain the async conversion so /acp-prompt-done waits for all in-flight appends
+    buffer.pending = buffer.pending
+      .then(async () => {
+        // Re-check buffer still exists (could have been flushed or expired)
+        if (!this.messageBuffers.has(userId)) return;
+
+        // Check TTL
+        if (Date.now() - buffer.lastUpdatedAt > BUFFER_TTL_MS) {
+          this.messageBuffers.delete(userId);
+          this.log(`Buffer expired for ${userId}`);
+          await this.sendReply(userId, contextToken, "⚠️ Buffering timed out (10 min without activity). Please send /acp-prompt-start again.");
+          return;
+        }
+
+        // Check block limit
+        if (buffer.blocks.length >= BUFFER_MAX_BLOCKS) {
+          await this.sendReply(userId, contextToken, `⚠️ Buffer is full (${BUFFER_MAX_BLOCKS} blocks max). Send /acp-prompt-done to submit what you have.`);
+          return;
+        }
+
+        const prompt = await weixinMessageToPrompt(
+          msg,
+          this.config.wechat.cdnBaseUrl,
+          this.log,
+          this.config.storage.inboxDir,
+        );
+        buffer.blocks.push(...prompt);
+        buffer.contextToken = contextToken;
+        buffer.lastUpdatedAt = Date.now();
+        this.resetBufferTimer(userId);
+
+        this.log(`Buffered message from ${userId}, now ${buffer.blocks.length} block(s)`);
+      });
+
+    buffer.pending.catch((err) => {
+      this.log(`Failed to buffer message from ${userId}: ${String(err)}`);
+      trackException(err, "buffer", hashUserId(userId));
+    });
+  }
+
+  private resetBufferTimer(userId: string): void {
+    this.clearBufferTimer(userId);
+    this.bufferTimers.set(userId, setTimeout(() => {
+      const buffer = this.messageBuffers.get(userId);
+      if (!buffer) return;
+      this.messageBuffers.delete(userId);
+      this.bufferTimers.delete(userId);
+      this.log(`Buffer expired (timer) for ${userId}`);
+    }, BUFFER_TTL_MS));
+  }
+
+  private clearBufferTimer(userId: string): void {
+    const timer = this.bufferTimers.get(userId);
+    if (timer) {
+      clearTimeout(timer);
+      this.bufferTimers.delete(userId);
+    }
   }
 
   private rememberActiveUser(userId: string, contextToken: string): void {

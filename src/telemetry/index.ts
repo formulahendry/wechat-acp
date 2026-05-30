@@ -32,6 +32,8 @@ export type EventName =
   | "command.acp_config.view"
   | "command.acp_config.set"
   | "command.acp_cancel"
+  | "command.buffer_start"
+  | "command.buffer_done"
   | "session.created"
   | "prompt.completed"
   | "reply.sent";
