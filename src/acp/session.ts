@@ -272,6 +272,7 @@ export class SessionManager {
 
         // Reset chunks for the new turn
         await session.client.flush();
+        session.client.newTurn();
 
         const promptStartedAt = Date.now();
         try {
@@ -312,6 +313,18 @@ export class SessionManager {
           // Send reply back to WeChat
           if (replyText.trim()) {
             await this.opts.onReply(session.userId, pending.contextToken, replyText);
+          } else if (!session.client.hasProducedMessage) {
+            // The turn ended without the agent ever producing a textual reply
+            // (e.g. it stopped after thoughts or a tool call). Surface a minimal
+            // notice so a turn never ends with zero user-facing output.
+            this.opts.log(
+              `[${session.userId}] Empty reply with no message produced (${result.stopReason}); sending fallback notice`,
+            );
+            await this.opts.onReply(
+              session.userId,
+              pending.contextToken,
+              `(no reply produced — agent stopped: ${String(result.stopReason)})`,
+            );
           }
         } catch (err) {
           completionError = err;
