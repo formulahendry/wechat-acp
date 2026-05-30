@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add customizable aliases for bridge slash commands via the `commandAliases` config map. Map any built-in command (`/acp-config`, `/acp-cancel`, `/acp-prompt-start`, `/acp-prompt-done`) to one or more custom aliases (e.g. `{"commandAliases": {"/acp-cancel": ["/cancel", "/取消"]}}`); the original built-in names keep working as a fallback. Aliases are validated at startup. See the README's "Customizing bridge command names (aliases)" section.
+- Fix multi-segment replies sometimes arriving out of order in WeChat. Each reply segment is an independent iLink send with no ordering hint, and WeChat orders back-to-back bot messages by server-receive time, so near-simultaneous sends could race and be delivered reversed (issue #38). Replies to the same user are now serialized behind a per-user queue and spaced ~150ms apart so their server-side timestamps preserve send order. Sends to different users are unaffected.
 
 ## 0.6.0
 
