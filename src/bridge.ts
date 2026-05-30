@@ -24,6 +24,16 @@ const ACP_CONFIG_COMMAND = "/acp-config";
 const ACP_CANCEL_COMMAND = "/acp-cancel";
 const TEXT_CHUNK_LIMIT = 4000;
 
+/**
+ * Minimum spacing between two consecutive outbound text messages to the
+ * same user. Each reply segment is an independent iLink API call with no
+ * ordering hint, and WeChat appears to order back-to-back bot messages by
+ * server-receive time. Without spacing, near-simultaneous sends can race
+ * and be delivered to the user out of order (see issue #38). A short delay
+ * separates their server-side timestamps and preserves order.
+ */
+const REPLY_SEND_SPACING_MS = 150;
+
 export class WeChatAcpBridge {
   private config: WeChatAcpConfig;
   private abortController = new AbortController();
@@ -33,6 +43,13 @@ export class WeChatAcpBridge {
   private stateUpdate = Promise.resolve();
   // Per-user typing ticket cache
   private typingTickets = new Map<string, { ticket: string; expiresAt: number }>();
+  // Timestamp (ms) at which the last text message was issued to each user,
+  // used to pace consecutive sends so they don't race and arrive reordered.
+  private lastSendAt = new Map<string, number>();
+  // Per-user promise chain serializing replies so concurrent sendReply calls
+  // (e.g. a command reply racing an active session flush) cannot interleave
+  // their segments and arrive out of order (issue #38).
+  private sendChains = new Map<string, Promise<void>>();
   private log: (msg: string) => void;
 
   constructor(config: WeChatAcpConfig, log?: (msg: string) => void) {
@@ -364,11 +381,28 @@ export class WeChatAcpBridge {
   }
 
   private async sendReply(userId: string, contextToken: string, text: string): Promise<void> {
+    // Serialize all replies to the same user behind a per-user promise chain so
+    // that segments from separate sendReply calls cannot interleave (issue #38).
+    // The stored link swallows errors so one failed reply doesn't break the
+    // chain for the next caller, while the returned promise still propagates.
+    const previous = this.sendChains.get(userId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => this.deliverReply(userId, contextToken, text));
+    this.sendChains.set(
+      userId,
+      current.catch(() => {}),
+    );
+    return current;
+  }
+
+  private async deliverReply(userId: string, contextToken: string, text: string): Promise<void> {
     const segments = splitText(text, TEXT_CHUNK_LIMIT);
     const startedAt = Date.now();
 
     try {
       for (const segment of segments) {
+        await this.paceConsecutiveSend(userId);
         await sendTextMessage(userId, segment, {
           baseUrl: this.tokenData!.baseUrl,
           token: this.tokenData!.token,
@@ -392,6 +426,26 @@ export class WeChatAcpBridge {
 
     // Cancel typing indicator after reply is sent
     this.cancelTypingIndicator(userId, contextToken).catch(() => {});
+  }
+
+  /**
+   * Wait, if necessary, so that consecutive text messages to the same user
+   * are issued at least {@link REPLY_SEND_SPACING_MS} apart. This spaces
+   * out their server-receive timestamps so WeChat preserves the order the
+   * bridge sent them in, instead of racing and delivering them reversed
+   * (issue #38). Sends to different users are tracked independently and do
+   * not delay each other.
+   */
+  private async paceConsecutiveSend(userId: string): Promise<void> {
+    const last = this.lastSendAt.get(userId);
+    const now = Date.now();
+    if (last !== undefined) {
+      const wait = REPLY_SEND_SPACING_MS - (now - last);
+      if (wait > 0) {
+        await new Promise((resolve) => setTimeout(resolve, wait));
+      }
+    }
+    this.lastSendAt.set(userId, Date.now());
   }
 
   private async cancelTypingIndicator(userId: string, contextToken: string): Promise<void> {
