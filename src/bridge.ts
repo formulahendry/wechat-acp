@@ -6,6 +6,7 @@
  */
 
 import type * as acp from "@agentclientprotocol/sdk";
+import crypto from "node:crypto";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
 import { sendTextMessage, splitText } from "./weixin/send.js";
@@ -28,6 +29,8 @@ const BUFFER_DONE_COMMAND = BRIDGE_COMMANDS.promptDone;
 const TEXT_CHUNK_LIMIT = 4000;
 const BUFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const BUFFER_MAX_BLOCKS = 50;
+const SEGMENT_SEND_MAX_ATTEMPTS = 3;
+const SEGMENT_SEND_RETRY_BASE_MS = 300;
 
 /**
  * Minimum spacing between two consecutive outbound text messages to the
@@ -609,30 +612,71 @@ export class WeChatAcpBridge {
   private async deliverReply(userId: string, contextToken: string, text: string): Promise<void> {
     const segments = splitText(text, TEXT_CHUNK_LIMIT);
     const startedAt = Date.now();
+    let segmentsSent = 0;
+    let anyFailed = false;
 
-    try {
-      for (const segment of segments) {
-        await this.paceConsecutiveSend(userId);
-        await sendTextMessage(userId, segment, {
-          baseUrl: this.tokenData!.baseUrl,
-          token: this.tokenData!.token,
-          contextToken,
-        });
+    for (const segment of segments) {
+      // Generate one stable idempotency key per segment *before* the retry
+      // loop so that all attempts for the same segment reuse the same
+      // client_id. The iLink gateway de-duplicates by client_id, so a retry
+      // after a transient hard error (connection reset, 5xx) will not produce
+      // a duplicate message even if the first attempt was already received.
+      const segmentClientId = `wechat-acp-${crypto.randomUUID()}`;
+      let sent = false;
+
+      for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
+        try {
+          await this.paceConsecutiveSend(userId);
+          await sendTextMessage(
+            userId,
+            segment,
+            {
+              baseUrl: this.tokenData!.baseUrl,
+              token: this.tokenData!.token,
+              contextToken,
+            },
+            segmentClientId,
+          );
+          sent = true;
+          break;
+        } catch (err) {
+          trackException(err, "reply.segment", hashUserId(userId));
+          if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
+            await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));
+          }
+        }
       }
-      trackEvent(
-        "reply.sent",
-        {
-          userIdHash: hashUserId(userId),
-          segments: segments.length,
-          chars: text.length,
-          durationMs: Date.now() - startedAt,
-        },
+
+      if (sent) {
+        segmentsSent++;
+      } else {
+        // Log the drop but continue — a single failed segment must not
+        // prevent the remaining segments from being delivered.
+        anyFailed = true;
+      }
+    }
+
+    if (anyFailed) {
+      trackException(
+        new Error(
+          `deliverReply: ${segments.length - segmentsSent}/${segments.length} segment(s) failed to send after retries`,
+        ),
+        "reply",
         hashUserId(userId),
       );
-    } catch (err) {
-      trackException(err, "reply", hashUserId(userId));
-      throw err;
     }
+
+    trackEvent(
+      "reply.sent",
+      {
+        userIdHash: hashUserId(userId),
+        segments: segments.length,
+        segmentsSent,
+        chars: text.length,
+        durationMs: Date.now() - startedAt,
+      },
+      hashUserId(userId),
+    );
 
     // Cancel typing indicator after reply is sent
     this.cancelTypingIndicator(userId, contextToken).catch(() => {});

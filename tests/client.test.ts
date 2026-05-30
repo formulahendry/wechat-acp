@@ -152,3 +152,38 @@ test("failed send retains buffer so final flush delivers the message", async () 
   const replyText = await client.flush();
   assert.equal(replyText, "status");
 });
+
+test("two sequential flushes are delivered in order (second waits for first)", async () => {
+  /**
+   * Scenario: chunk A is flushed at boundary-1, then chunk B is flushed at
+   * boundary-2 while A's send is still awaiting. The mutex chain must ensure
+   * A completes before B starts, so WeChat always receives A before B.
+   */
+  const order: string[] = [];
+  let releaseA!: () => void;
+  const client = makeClient({
+    onMessageFlush: async (text) => {
+      if (text === "chunk A") {
+        // Simulate a slow first send
+        await new Promise<void>((r) => {
+          releaseA = r;
+        });
+      }
+      order.push(text);
+    },
+  });
+
+  await emitMessageChunk(client, "chunk A");
+  // Fire boundary-1 without awaiting so it blocks on the slow send
+  const p1 = emitToolCall(client);
+
+  await emitMessageChunk(client, "chunk B");
+  // Fire boundary-2 — must queue behind A
+  const p2 = emitToolCall(client);
+
+  // Release A's send
+  releaseA();
+  await Promise.all([p1, p2]);
+
+  assert.deepEqual(order, ["chunk A", "chunk B"], "second message must arrive after first");
+});

@@ -25,6 +25,9 @@ export class WeChatAcpClient implements acp.Client {
   private opts: WeChatAcpClientOpts;
   private lastTypingAt = 0;
   private producedMessageThisTurn = false;
+  // Promise chain serializing onMessageFlush calls so concurrent boundary events
+  // cannot interleave sends (e.g. chunk B reaching WeChat before chunk A).
+  private messageFlushChain: Promise<void> = Promise.resolve();
   private static readonly TYPING_INTERVAL_MS = 5_000;
   private static readonly SEND_MAX_ATTEMPTS = 3;
   private static readonly SEND_RETRY_BASE_MS = 300;
@@ -176,6 +179,9 @@ export class WeChatAcpClient implements acp.Client {
   /** Get accumulated text and reset the buffer. Also flushes any remaining thoughts. */
   async flush(): Promise<string> {
     await this.maybeFlushThoughts();
+    // Drain any in-flight sends (queued by maybeFlushMessage) before reading
+    // the buffer so a retried-and-restored flush cannot race with this read.
+    await this.messageFlushChain.catch(() => {});
     const text = this.chunks.join("");
     this.chunks = [];
     this.lastTypingAt = 0;
@@ -209,22 +215,39 @@ export class WeChatAcpClient implements acp.Client {
       this.chunks = [];
       return;
     }
-    // Clear the buffer synchronously BEFORE awaiting the send so that any
-    // concurrent sessionUpdate calls (the ACP SDK fires notifications without
-    // awaiting handlers) see an empty buffer and skip the flush instead of
-    // re-sending the same text. New chunks arriving during the send will be
-    // appended to the now-empty array and flushed at the next boundary.
+    // Clear the buffer synchronously BEFORE awaiting so that any concurrent
+    // sessionUpdate calls (the ACP SDK fires notifications without awaiting
+    // handlers) see an empty buffer and skip the flush instead of re-sending
+    // the same text. New chunks arriving during the send are appended to the
+    // now-empty array and flushed at the next boundary.
     this.chunks = [];
-    const ok = await this.sendWithRetry(() => this.opts.onMessageFlush(text), "message");
-    if (!ok) {
-      // Send failed after all retries. Prepend the unsent text back so the
-      // final flush() returns it and session.ts re-attempts via onReply (which
-      // surfaces failure to the user). Any new chunks appended during the
-      // failed send attempts are preserved after the restored text.
-      this.chunks = [text, ...this.chunks];
-      this.opts.log(
-        `[flush] message send failed after retries; retaining ${text.length} chars for final flush`,
-      );
+
+    // Acquire a send slot using a simple mutex chain: each caller saves the
+    // current tail of the chain, replaces it with a new unresolved promise,
+    // and awaits the old tail before sending. This guarantees strict FIFO
+    // ordering — chunk A always reaches WeChat before chunk B even when both
+    // boundary events fire nearly simultaneously.
+    const prev = this.messageFlushChain;
+    let resolve!: () => void;
+    this.messageFlushChain = new Promise<void>((r) => {
+      resolve = r;
+    });
+    await prev.catch(() => {});
+
+    try {
+      const ok = await this.sendWithRetry(() => this.opts.onMessageFlush(text), "message");
+      if (!ok) {
+        // Send failed after all retries. Prepend the unsent text back so the
+        // final flush() returns it and session.ts re-attempts via onReply (which
+        // surfaces failure to the user). Any new chunks appended during the
+        // failed send attempts are preserved after the restored text.
+        this.chunks = [text, ...this.chunks];
+        this.opts.log(
+          `[flush] message send failed after retries; retaining ${text.length} chars for final flush`,
+        );
+      }
+    } finally {
+      resolve();
     }
   }
 

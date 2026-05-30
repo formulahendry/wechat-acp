@@ -16,20 +16,25 @@ export async function sendTextMessage(
   to: string,
   text: string,
   opts: WeixinSendOpts,
+  clientId?: string,
+  sendFn: typeof sendMessage = sendMessage,
 ): Promise<string> {
   if (!opts.contextToken) {
     throw new Error("contextToken is required to send a message");
   }
 
-  const clientId = `wechat-acp-${crypto.randomUUID()}`;
-  await sendMessage({
+  // Generate a stable idempotency key for this logical send. Callers that
+  // retry should pass the same clientId so the iLink gateway de-duplicates
+  // repeated deliveries of the same message segment.
+  const id = clientId ?? `wechat-acp-${crypto.randomUUID()}`;
+  await sendFn({
     baseUrl: opts.baseUrl,
     token: opts.token,
     body: {
       msg: {
         from_user_id: "",
         to_user_id: to,
-        client_id: clientId,
+        client_id: id,
         message_type: MessageType.BOT,
         message_state: MessageState.FINISH,
         context_token: opts.contextToken,
@@ -37,7 +42,7 @@ export async function sendTextMessage(
       },
     },
   });
-  return clientId;
+  return id;
 }
 
 /**
