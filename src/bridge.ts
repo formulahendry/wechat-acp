@@ -15,13 +15,14 @@ import type { WeixinMessage } from "./weixin/types.js";
 import { SessionManager } from "./acp/session.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
 import type { WeChatAcpConfig } from "./config.js";
+import { BRIDGE_COMMANDS, resolveCommandAliases, resolveCommandNames } from "./config.js";
 import { InjectionMonitor } from "./inject/monitor.js";
 import type { InjectedMessage } from "./inject/types.js";
 import { resolveUserTarget, updateLastActiveUser } from "./storage/state.js";
 import { trackEvent, trackException, hashUserId } from "./telemetry/index.js";
 
-const ACP_CONFIG_COMMAND = "/acp-config";
-const ACP_CANCEL_COMMAND = "/acp-cancel";
+const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
+const ACP_CANCEL_COMMAND = BRIDGE_COMMANDS.acpCancel;
 const TEXT_CHUNK_LIMIT = 4000;
 
 export class WeChatAcpBridge {
@@ -335,7 +336,7 @@ export class WeChatAcpBridge {
     }
     lines.push("");
     lines.push("💡 **Usage**");
-    lines.push(`   • Cancel current turn:        ${ACP_CANCEL_COMMAND}`);
+    lines.push(`   • Cancel current turn:        ${ACP_CANCEL_COMMAND}${this.aliasHint(ACP_CANCEL_COMMAND)}`);
     lines.push(`   • Cancel + drop queued msgs:  ${ACP_CANCEL_COMMAND} all`);
     return lines.join("\n");
   }
@@ -347,7 +348,7 @@ export class WeChatAcpBridge {
       lines.push("");
     }
     lines.push("💡 **Usage**");
-    lines.push(`   • Cancel current turn:        ${ACP_CANCEL_COMMAND}`);
+    lines.push(`   • Cancel current turn:        ${ACP_CANCEL_COMMAND}${this.aliasHint(ACP_CANCEL_COMMAND)}`);
     lines.push(`   • Cancel + drop queued msgs:  ${ACP_CANCEL_COMMAND} all`);
     return lines.join("\n");
   }
@@ -488,7 +489,7 @@ export class WeChatAcpBridge {
     return this.extractBridgeCommand(msg, ACP_CANCEL_COMMAND);
   }
 
-  private extractBridgeCommand(msg: WeixinMessage, command: string): string | null {
+  private extractBridgeCommand(msg: WeixinMessage, canonical: string): string | null {
     const items = msg.item_list ?? [];
     if (items.length !== 1) return null;
 
@@ -496,7 +497,23 @@ export class WeChatAcpBridge {
     if (item?.type !== 1 || !item.text_item?.text) return null;
 
     const text = item.text_item.text.trim();
-    return text === command || text.startsWith(`${command} `) ? text : null;
+    const names = resolveCommandNames(canonical, this.config.commandAliases);
+    for (const name of names) {
+      if (text === name || text.startsWith(`${name} `)) {
+        return text;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Render a usage hint suffix listing any configured aliases for a
+   * canonical command, e.g. " (aliases: /cancel, /取消)". Returns an
+   * empty string when no aliases are configured.
+   */
+  private aliasHint(canonical: string): string {
+    const aliases = resolveCommandAliases(canonical, this.config.commandAliases);
+    return aliases.length > 0 ? ` (aliases: ${aliases.join(", ")})` : "";
   }
 
   private formatAcpConfigList(userId: string): string {
@@ -530,7 +547,7 @@ export class WeChatAcpBridge {
     lines.push("");
     lines.push("━━━━━━━━━━━━━━━━");
     lines.push("💡 **Usage**");
-    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}`);
+    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}${this.aliasHint(ACP_CONFIG_COMMAND)}`);
     lines.push(`   • Update: ${ACP_CONFIG_COMMAND} set <configId> <value>`);
     return lines.join("\n");
   }
@@ -542,7 +559,7 @@ export class WeChatAcpBridge {
       lines.push("");
     }
     lines.push("💡 **Usage**");
-    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}`);
+    lines.push(`   • View:   ${ACP_CONFIG_COMMAND}${this.aliasHint(ACP_CONFIG_COMMAND)}`);
     lines.push(`   • Update: ${ACP_CONFIG_COMMAND} set <configId> <value>`);
     return lines.join("\n");
   }

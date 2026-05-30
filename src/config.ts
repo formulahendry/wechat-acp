@@ -91,7 +91,26 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
   },
 };
 
+/**
+ * Canonical bridge slash commands that `wechat-acp` handles itself
+ * (i.e. not forwarded to the underlying agent). Used as the keys of
+ * {@link WeChatAcpConfig.commandAliases} and as the fallback names that
+ * always work regardless of configured aliases.
+ */
+export const BRIDGE_COMMANDS = {
+  acpConfig: "/acp-config",
+  acpCancel: "/acp-cancel",
+} as const;
+
 export interface WeChatAcpConfig {
+  /**
+   * Optional user-defined aliases for bridge slash commands. Maps a
+   * canonical command (e.g. `"/acp-cancel"`) to one or more custom
+   * aliases (e.g. `["/cancel", "/取消"]`). The canonical command always
+   * keeps working as a fallback. See {@link BRIDGE_COMMANDS} for the set
+   * of commands that can be aliased.
+   */
+  commandAliases?: Record<string, string[]>;
   wechat: {
     baseUrl: string;
     cdnBaseUrl: string;
@@ -162,6 +181,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
   const instance = opts?.instance;
   const storageDir = defaultStorageDir(instance);
   return {
+    commandAliases: {},
     wechat: {
       baseUrl: "https://ilinkai.weixin.qq.com",
       cdnBaseUrl: "https://novac2c.cdn.weixin.qq.com/c2c",
@@ -240,4 +260,92 @@ export function listBuiltInAgents(
   return Object.entries(registry)
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([id, preset]) => ({ id, preset }));
+}
+
+/**
+ * Resolve the configured aliases for a canonical bridge command into a
+ * trimmed, de-duplicated list. The canonical command itself is not
+ * included — use {@link resolveCommandNames} when you need the full set
+ * of names that should trigger a command.
+ */
+export function resolveCommandAliases(
+  canonical: string,
+  aliases?: Record<string, string[]>,
+): string[] {
+  const configured = aliases?.[canonical];
+  if (!configured) return [];
+  const result: string[] = [];
+  for (const alias of configured) {
+    const trimmed = alias.trim();
+    if (trimmed && !result.includes(trimmed)) {
+      result.push(trimmed);
+    }
+  }
+  return result;
+}
+
+/**
+ * Return the full ordered list of names that should trigger a bridge
+ * command: the canonical name first, followed by any user-defined
+ * aliases. The canonical name is always present so built-in commands
+ * keep working as a fallback even when aliases are configured.
+ */
+export function resolveCommandNames(
+  canonical: string,
+  aliases?: Record<string, string[]>,
+): string[] {
+  return [canonical, ...resolveCommandAliases(canonical, aliases).filter((a) => a !== canonical)];
+}
+
+/**
+ * Validate a `commandAliases` map. Aliases must be non-empty strings that
+ * start with `/` and contain no whitespace (whitespace would break
+ * command/argument parsing). Throws an `Error` describing the first
+ * problem found.
+ */
+export function validateCommandAliases(aliases: Record<string, string[]> | undefined): void {
+  if (aliases === undefined) return;
+  if (typeof aliases !== "object" || aliases === null || Array.isArray(aliases)) {
+    throw new Error("commandAliases must be an object mapping a command to a list of aliases.");
+  }
+
+  const knownCommands = new Set<string>(Object.values(BRIDGE_COMMANDS));
+  const seen = new Map<string, string>();
+
+  for (const [canonical, list] of Object.entries(aliases)) {
+    if (!knownCommands.has(canonical)) {
+      throw new Error(
+        `commandAliases: unknown command ${JSON.stringify(canonical)}. ` +
+          `Known commands: ${[...knownCommands].join(", ")}.`,
+      );
+    }
+    if (!Array.isArray(list)) {
+      throw new Error(`commandAliases[${JSON.stringify(canonical)}] must be an array of strings.`);
+    }
+    for (const alias of list) {
+      if (typeof alias !== "string" || alias.trim() === "") {
+        throw new Error(`commandAliases[${JSON.stringify(canonical)}] contains an empty alias.`);
+      }
+      const trimmed = alias.trim();
+      if (!trimmed.startsWith("/")) {
+        throw new Error(`commandAliases: alias ${JSON.stringify(trimmed)} must start with "/".`);
+      }
+      if (/\s/.test(trimmed)) {
+        throw new Error(`commandAliases: alias ${JSON.stringify(trimmed)} must not contain whitespace.`);
+      }
+      if (knownCommands.has(trimmed) && trimmed !== canonical) {
+        throw new Error(
+          `commandAliases: alias ${JSON.stringify(trimmed)} collides with built-in command ${JSON.stringify(trimmed)}.`,
+        );
+      }
+      const owner = seen.get(trimmed);
+      if (owner && owner !== canonical) {
+        throw new Error(
+          `commandAliases: alias ${JSON.stringify(trimmed)} is mapped to both ` +
+            `${JSON.stringify(owner)} and ${JSON.stringify(canonical)}.`,
+        );
+      }
+      seen.set(trimmed, canonical);
+    }
+  }
 }

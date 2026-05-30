@@ -23,6 +23,7 @@ import {
   defaultStorageDir,
   listBuiltInAgents,
   resolveAgentSelection,
+  validateCommandAliases,
   validateInstanceName,
 } from "../src/config.js";
 import type { WeChatAcpConfig } from "../src/config.js";
@@ -357,6 +358,11 @@ async function main(): Promise<void> {
     Object.assign(config.agents, fileConfig.agents ?? {});
     Object.assign(config.session, fileConfig.session ?? {});
     Object.assign(config.daemon, fileConfig.daemon ?? {});
+    if (Object.prototype.hasOwnProperty.call(fileConfig, "commandAliases")) {
+      // Assign the raw value (even if malformed) so the post-merge
+      // validateCommandAliases() below can reject it with a clean error.
+      config.commandAliases = fileConfig.commandAliases;
+    }
     // Track whether the user explicitly set inboxDir so we don't
     // overwrite their choice with a re-derived default below. We check
     // before Object.assign because checking after can't distinguish
@@ -427,6 +433,13 @@ async function main(): Promise<void> {
     }
   } else {
     config.storage.injectDir = path.join(config.storage.dir, "inject");
+  }
+
+  try {
+    validateCommandAliases(config.commandAliases);
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
   }
 
   // Handle subcommands

@@ -169,6 +169,37 @@ You can also override or add agent presets:
 }
 ```
 
+## Customizing bridge command names (aliases)
+
+Bridge slash commands like `/acp-config` and `/acp-cancel` have fixed
+built-in names that may not feel natural to everyone, and can clash with
+slash commands built into the underlying agent. You can map any bridge
+command to one or more custom aliases via the `commandAliases` config map:
+
+```json
+{
+  "commandAliases": {
+    "/acp-cancel": ["/cancel", "/取消"],
+    "/acp-config": ["/config", "/设置"]
+  }
+}
+```
+
+With this config:
+
+- Sending `/取消` cancels the current turn (same as `/acp-cancel`), and
+  `/取消 all` works like `/acp-cancel all`.
+- Sending `/设置` lists ACP session config (same as `/acp-config`), and
+  `/设置 set <configId> <value>` works like `/acp-config set ...`.
+- The original built-in names always keep working as a fallback.
+
+Notes:
+
+- Keys must be a known bridge command (`/acp-config` or `/acp-cancel`).
+- Each alias must start with `/` and contain no whitespace.
+- An alias may not collide with a built-in command name or be mapped to
+  more than one command. Invalid configs are rejected at startup.
+
 ## Runtime Behavior
 
 - Each WeChat user gets a dedicated ACP session and subprocess.
@@ -200,6 +231,7 @@ Notes:
 - The command only works after the WeChat user already has an active ACP session. If not, send a normal message first so the session is created.
 - Available `configId` values come directly from the ACP agent's `configOptions`, so the exact list depends on the configured agent.
 - This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.
+- You can give this command your own aliases via `commandAliases` (see [Customizing bridge command names](#customizing-bridge-command-names-aliases)).
 
 ## WeChat ACP cancel command
 
@@ -216,6 +248,7 @@ Behavior:
 - `/acp-cancel all` does the same and also drops every message that was queued behind the current turn. Local injections (`wechat-acp inject`) waiting on those queued messages are rejected.
 - If no turn is in flight, the command replies with a notice and is a no-op.
 - This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.
+- You can give this command your own aliases via `commandAliases` (see [Customizing bridge command names](#customizing-bridge-command-names-aliases)).
 
 ## Injecting messages locally
 
