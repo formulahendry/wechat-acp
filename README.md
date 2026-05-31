@@ -45,6 +45,16 @@ On first run, the bridge will:
 3. Save the login token under `~/.wechat-acp`
 4. Begin polling direct messages
 
+## Trying preview builds
+
+Every push to `main` is automatically published to npm under the `next` dist-tag, so you can try unreleased changes without waiting for a tagged release:
+
+```bash
+npx -y wechat-acp@next --agent copilot
+```
+
+These versions are tagged `<base>-next.<UTC-timestamp>.<short-sha>` (e.g. `0.7.1-next.202605311530.abc1234`, where `0.7.1` is the next patch above whatever `@latest` is). They are built from `main` after CI passes, but have not been through a release review — expect rough edges. Stable users should keep using `wechat-acp@latest`.
+
 ## Built-in Agent Presets
 
 List the bundled presets:

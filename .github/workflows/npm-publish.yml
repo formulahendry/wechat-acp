@@ -1,4 +1,4 @@
-# Publish the npm package on GitHub Release.
+# Publish the npm package on GitHub Release, plus per-push prereleases from main.
 #
 # Uses npm trusted publishing (OIDC) via `--provenance`, so no NPM_TOKEN is
 # required in the repo secrets. The maintainer must register this workflow
@@ -9,17 +9,35 @@
 #     workflow: npm-publish.yml
 #     environment: (leave blank)
 #
-# After that, create a GitHub Release (tagged e.g. v0.1.5) and this workflow
-# will publish wechat-acp@0.1.5 to npm with build provenance attached.
+# Two jobs share the same workflow filename (and therefore the same trusted
+# publisher entry — npm's web UI only allows one entry per package):
+#   - publish-release: on GitHub Release `created`, publishes to dist-tag `latest`
+#   - publish-next:    on push to `main`, publishes a `<version>-next.<ts>.<sha>`
+#                      prerelease to dist-tag `next`
+#
+# Users install:
+#   stable:  npx wechat-acp@latest
+#   preview: npx wechat-acp@next
 
-name: publish-on-release
+name: publish-npm
 
 on:
   release:
     types: [created]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Serialize publishes per channel so a fast follow-up push can't race ahead
+  # of an in-flight publish. Release publishes get their own group keyed on
+  # the release tag so they never block / get blocked by next publishes.
+  group: npm-publish-${{ github.event_name == 'release' && github.event.release.tag_name || 'next' }}
+  cancel-in-progress: false
 
 jobs:
-  publish-npm:
+  publish-release:
+    if: github.event_name == 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -47,3 +65,66 @@ jobs:
           fi
       - run: npm ci
       - run: npm publish --provenance --access public
+
+  publish-next:
+    # Runs on every push to main and on manual dispatch. Publishes a
+    # prerelease versioned as `<package.json version>-next.<UTC timestamp>.<short sha>`
+    # to the `next` dist-tag. Never touches `latest`, never commits anything back.
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+      - name: Compute prerelease version
+        id: version
+        run: |
+          base="$(node -p "require('./package.json').version")"
+          # Strip any existing prerelease suffix from base so we never publish
+          # `0.7.0-next.x-next.y` if package.json is mid-bump.
+          base="${base%%-*}"
+          # If the base version is already published as `latest`, bump the
+          # patch number so the next-tag version sorts ABOVE `latest`. Without
+          # this, `1.2.3-next.x` < `1.2.3` per semver, and `npm i @next` would
+          # look like a downgrade. If the maintainer has already staged the
+          # next release in package.json (e.g. 1.2.4 or 1.3.0), respect it.
+          latest="$(npm view wechat-acp version 2>/dev/null || echo '')"
+          if [ -n "$latest" ] && [ "$base" = "$latest" ]; then
+            IFS='.' read -r major minor patch <<< "$base"
+            base="${major}.${minor}.$((patch + 1))"
+            echo "Base version ${latest} already published; bumped to ${base}"
+          fi
+          stamp="$(date -u +%Y%m%d%H%M)"
+          sha="$(git rev-parse --short=7 HEAD)"
+          version="${base}-next.${stamp}.${sha}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Computed prerelease version: ${version}"
+      - name: Check if version already published
+        id: check
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if npm view "wechat-acp@${VERSION}" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::wechat-acp@${VERSION} already published, skipping."
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+      - run: npm ci
+        if: steps.check.outputs.already != 'true'
+      - run: npm run build
+        if: steps.check.outputs.already != 'true'
+      - name: Set prerelease version in package.json (no commit)
+        if: steps.check.outputs.already != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: npm version "${VERSION}" --no-git-tag-version --allow-same-version
+      - name: Publish to npm under `next` dist-tag
+        if: steps.check.outputs.already != 'true'
+        run: npm publish --tag next --provenance --access public
+
