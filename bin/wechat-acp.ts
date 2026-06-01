@@ -77,7 +77,6 @@ Options:
   --max-sessions <n>  Max concurrent user sessions (default: 10)
   --hide-thoughts     Do not forward agent thinking to WeChat (default: forwarded)
   --show-diffs        Forward ACP file diffs to WeChat (default: hidden)
-  --hide-diffs        Deprecated no-op; diffs are hidden by default
   --text <text>       Message text for "inject"
   --file <path>       Read injected message text from a file
   --to <target>       Injection target (default: ${DEFAULT_INJECTION_TARGET})
@@ -137,7 +136,6 @@ function parseArgs(argv: string[]): {
   injectContextToken?: string;
   hideThoughts: boolean;
   showDiffs: boolean;
-  hideDiffs: boolean;
   verbose: boolean;
   version: boolean;
   help: boolean;
@@ -148,7 +146,6 @@ function parseArgs(argv: string[]): {
     disableInbox: false,
     hideThoughts: false,
     showDiffs: false,
-    hideDiffs: false,
     verbose: false,
     version: false,
     help: false,
@@ -213,9 +210,6 @@ function parseArgs(argv: string[]): {
         break;
       case "--show-diffs":
         result.showDiffs = true;
-        break;
-      case "--hide-diffs":
-        result.hideDiffs = true;
         break;
       case "-v":
       case "--verbose":
@@ -497,7 +491,6 @@ async function main(): Promise<void> {
   if (args.maxSessions) config.session.maxConcurrentUsers = args.maxSessions;
   if (args.hideThoughts) config.agent.showThoughts = false;
   if (args.showDiffs) config.agent.showDiffs = true;
-  if (args.hideDiffs) config.agent.showDiffs = false;
   config.daemon.enabled = args.daemon;
 
   // Handle daemon mode

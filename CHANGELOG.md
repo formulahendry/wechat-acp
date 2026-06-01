@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Hide ACP file diffs by default. Use `--show-diffs` or `agent.showDiffs: true` to forward diffs to WeChat; `--hide-diffs` remains accepted as a deprecated no-op for compatibility.
+- Hide ACP file diffs by default. Use `--show-diffs` or `agent.showDiffs: true` to forward diffs to WeChat.
 
 ## 0.7.1
 
