@@ -131,7 +131,7 @@ export class WeChatAcpBridge {
       idleTimeoutMs: this.config.session.idleTimeoutMs,
       maxConcurrentUsers: this.config.session.maxConcurrentUsers,
       showThoughts: this.config.agent.showThoughts,
-      showDiffs: this.config.agent.showDiffs ?? true,
+      showDiffs: this.config.agent.showDiffs ?? false,
       log: this.log,
       onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
       sendTyping: (userId, contextToken) => this.sendTypingIndicator(userId, contextToken),

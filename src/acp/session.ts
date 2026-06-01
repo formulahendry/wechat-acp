@@ -233,7 +233,7 @@ export class SessionManager {
       },
       log: (msg) => this.opts.log(`[${userId}] ${msg}`),
       showThoughts: this.opts.showThoughts,
-      showDiffs: this.opts.showDiffs ?? true,
+      showDiffs: this.opts.showDiffs ?? false,
     });
 
     const agentInfo = await spawnAgent({

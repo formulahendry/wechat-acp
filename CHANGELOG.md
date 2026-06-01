@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Hide ACP file diffs by default. Use `--show-diffs` or `agent.showDiffs: true` to forward diffs to WeChat; `--hide-diffs` remains accepted as a deprecated no-op for compatibility.
+
 ## 0.7.1
 
 - Fix intermediate WeChat messages being delivered multiple times, out of order, or losing the trailing segments. Concurrent boundary flushes now go through a per-client mutex chain; each reply segment retries with a stable `client_id` so the iLink gateway de-duplicates; and a failed segment no longer aborts the remaining segments in the same reply (#41).

@@ -195,7 +195,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       args: [],
       cwd: process.cwd(),
       showThoughts: true,
-      showDiffs: true,
+      showDiffs: false,
     },
     agents: { ...BUILT_IN_AGENTS },
     session: {

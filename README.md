@@ -102,7 +102,8 @@ Options:
 - `--inbox-dir <dir>`: directory where received binary files are saved (default: `<storage.dir>/inbox`). The agent sees the absolute saved path in the prompt and can read the file directly.
 - `--no-inbox`: do not save received files; the agent only sees a size notice.
 - `--hide-thoughts`: do not forward agent thinking to WeChat (default: forwarded)
-- `--hide-diffs`: do not forward ACP file diffs to WeChat (default: forwarded)
+- `--show-diffs`: forward ACP file diffs to WeChat (default: hidden)
+- `--hide-diffs`: deprecated no-op; diffs are hidden by default
 - `inject --text <text>`: enqueue a local text message for the running daemon
 - `-V, --version`: print version and exit
 - `-h, --help`: show help
