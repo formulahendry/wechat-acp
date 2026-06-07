@@ -100,6 +100,7 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
 export const BRIDGE_COMMANDS = {
   acpConfig: "/acp-config",
   acpCancel: "/acp-cancel",
+  acpNew: "/acp-new",
   promptStart: "/acp-prompt-start",
   promptDone: "/acp-prompt-done",
 } as const;
