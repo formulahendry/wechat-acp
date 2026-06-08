@@ -417,13 +417,36 @@ export class WeChatAcpBridge {
       this.clearBufferTimer(userId);
     }
 
-    // Clear any in-progress buffer flush
+    // If a buffer flush is already in progress, don't drop the tracking entry.
+    // Let the flush enqueue first, then immediately kill the session so the
+    // flushed content (and any queued work) is discarded and doesn't spawn a
+    // brand-new session after the reset.
+    const flushPromise = this.bufferFlushing.get(userId);
+    if (flushPromise) {
+      const hadSession = !!this.sessionManager.getSession(userId);
+      flushPromise.finally(() => {
+        this.sessionManager?.killSession(userId, "user-requested-reset");
+      });
+      trackEvent(
+        "command.acp_new",
+        { userIdHash: hashUserId(userId), hadSession, delayedUntilFlush: true },
+        hashUserId(userId),
+      );
+      await this.sendReply(
+        userId,
+        contextToken,
+        "🔄 Reset requested. I’ll end the session as soon as the current buffer flush finishes. Your next message will start a fresh session.",
+      );
+      return;
+    }
+
+    // No in-progress flush: kill immediately.
     this.bufferFlushing.delete(userId);
 
     const killed = this.sessionManager.killSession(userId, "user-requested-reset");
     trackEvent(
       "command.acp_new",
-      { userIdHash: hashUserId(userId), hadSession: killed },
+      { userIdHash: hashUserId(userId), hadSession: killed, delayedUntilFlush: false },
       hashUserId(userId),
     );
 
@@ -434,7 +457,6 @@ export class WeChatAcpBridge {
       await this.sendReply(userId, contextToken,
         `ℹ️ No active session to reset. A new session will be created on your next message.`);
     }
-  }
 
   private formatAcpCancelResult(
     result: { cancelledTurn: boolean; droppedQueueCount: number },
