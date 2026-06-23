@@ -6,6 +6,12 @@
 import crypto from "node:crypto";
 import type { CDNMedia } from "./types.js";
 
+export function aesEcbPaddedSize(plaintextLen: number): number {
+  const blockSize = 16;
+  const padLen = blockSize - (plaintextLen % blockSize);
+  return plaintextLen + padLen;
+}
+
 export function encryptAesEcb(plaintext: Buffer, key: Buffer): Buffer {
   const cipher = crypto.createCipheriv("aes-128-ecb", key, null);
   return Buffer.concat([cipher.update(plaintext), cipher.final()]);

@@ -36,6 +36,7 @@ export async function spawnAgent(params: {
     cwd,
     env: { ...process.env, ...env },
     shell: useShell,
+    detached: true,
     windowsHide: true,
   });
 
@@ -96,11 +97,20 @@ export async function spawnAgent(params: {
 }
 
 export function killAgent(proc: ChildProcess): void {
-  if (!proc.killed) {
+  if (proc.killed || !proc.pid) return;
+  try {
+    // Negative pid kills the entire process group — agent, MCP subprocesses,
+    // and any grandchildren spawned by the agent.
+    process.kill(-proc.pid, "SIGTERM");
+  } catch {
+    // Process may have already exited; fall back to direct kill
     proc.kill("SIGTERM");
-    // Force kill after 5s if still alive
-    setTimeout(() => {
-      if (!proc.killed) proc.kill("SIGKILL");
-    }, 5_000).unref();
   }
+  // Force kill after 5s if still alive
+  const pgid = proc.pid;
+  const timer = setTimeout(() => {
+    if (proc.killed || !pgid) return;
+    try { process.kill(-pgid, "SIGKILL"); } catch { proc.kill("SIGKILL"); }
+  }, 5_000);
+  timer.unref();
 }

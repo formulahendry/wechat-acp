@@ -300,11 +300,17 @@ function daemonize(config: WeChatAcpConfig): void {
   const out = fs.openSync(logFile, "a");
   const err = fs.openSync(logFile, "a");
 
-  // Re-run ourselves with --no-daemon (internal flag) as a detached process
-  const args = process.argv.slice(1).filter((a) => a !== "--daemon");
-  const child = spawn(process.execPath, args, {
+  // Re-run ourselves as a detached child process.
+  // Preserve the original node flags (e.g. --import tsx/esm) so that
+  // TypeScript ESM imports continue to resolve in the child.
+  const childArgs = [
+    ...process.execArgv,
+    ...process.argv.slice(1).filter((a) => a !== "--daemon"),
+  ];
+  const child = spawn(process.execPath, childArgs, {
     detached: true,
     stdio: ["ignore", out, err],
+    cwd: process.cwd(),
     env: { ...process.env, WECHAT_ACP_DAEMON: "1" },
     windowsHide: true,
   });
@@ -513,36 +519,72 @@ async function main(): Promise<void> {
   const startedAt = Date.now();
 
   // Create and start bridge
-  const bridge = new WeChatAcpBridge(config, (msg) => {
+  const bridgeLog = (msg: string) => {
     const ts = new Date().toISOString().substring(11, 19);
     console.log(`[${ts}] ${msg}`);
-  });
+  };
+  let bridge = new WeChatAcpBridge(config, bridgeLog);
 
   // Handle graceful shutdown
-  const shutdown = async (reason: "signal" | "error" | "normal") => {
+  let shuttingDown = false;
+  const shutdown = (reason: "signal" | "error" | "normal") => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     trackEvent("app.stop", { reason, uptimeSec: Math.round((Date.now() - startedAt) / 1000) });
-    await bridge.stop();
-    await shutdownTelemetry();
-    process.exit(reason === "error" ? 1 : 0);
+    bridge.stop().finally(() => {
+      shutdownTelemetry().finally(() => process.exit(reason === "error" ? 1 : 0));
+    });
   };
   process.on("SIGINT", () => void shutdown("signal"));
   process.on("SIGTERM", () => void shutdown("signal"));
 
-  try {
+  // In daemon mode, auto-restart the bridge on unexpected death
+  if (config.daemon.enabled && process.env.WECHAT_ACP_DAEMON) {
+    let restartCount = 0;
+    const maxRestarts = 10;
+    const restartCapMs = 60_000;
+
+    while (!shuttingDown) {
+      try {
+        await bridge.start({
+          forceLogin: args.forceLogin && restartCount === 0,
+          renderQrUrl: renderQrInTerminal,
+        });
+        // Normal shutdown (aborted signal), don't restart
+        break;
+      } catch (err) {
+        if (shuttingDown || (err as Error).message === "aborted") break;
+
+        restartCount++;
+        trackException(err, "daemon.crash");
+        console.error(`[daemon] bridge crashed (restart ${restartCount}/${maxRestarts}): ${String(err)}`);
+
+        // Kill the old bridge's agent processes before restarting
+        console.error(`[daemon] stopping old bridge before restart...`);
+        await bridge.stop();
+
+        if (restartCount >= maxRestarts) {
+          console.error("[daemon] max restarts reached, giving up");
+          process.exit(1);
+        }
+
+        const delay = Math.min(1000 * Math.pow(2, restartCount), restartCapMs);
+        console.error(`[daemon] restarting in ${delay / 1000}s...`);
+        await new Promise((r) => {
+          const t = setTimeout(r, delay);
+          process.on("SIGTERM", () => { clearTimeout(t); });
+          process.on("SIGINT", () => { clearTimeout(t); });
+        });
+
+        // Recreate bridge for fresh state
+        bridge = new WeChatAcpBridge(config, bridgeLog);
+      }
+    }
+  } else {
     await bridge.start({
       forceLogin: args.forceLogin,
       renderQrUrl: renderQrInTerminal,
     });
-  } catch (err) {
-    if ((err as Error).message === "aborted") {
-      // Normal shutdown
-    } else {
-      trackException(err, "main");
-      trackEvent("app.stop", { reason: "error", uptimeSec: Math.round((Date.now() - startedAt) / 1000) });
-      await shutdownTelemetry();
-      console.error(`Fatal: ${String(err)}`);
-      process.exit(1);
-    }
   }
 }
 

@@ -7,12 +7,16 @@
  */
 
 import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import type * as acp from "@agentclientprotocol/sdk";
+import { StreamingMarkdownFilter } from "../weixin/markdown-filter.js";
 
 export interface WeChatAcpClientOpts {
   sendTyping: () => Promise<void>;
   onThoughtFlush: (text: string) => Promise<void>;
   onMessageFlush: (text: string) => Promise<void>;
+  onMediaFile: (filePath: string, mimeType: string, fileName?: string) => Promise<void>;
   onConfigOptionsUpdate?: (configOptions: acp.SessionConfigOption[]) => void;
   log: (msg: string) => void;
   showThoughts: boolean;
@@ -22,6 +26,7 @@ export interface WeChatAcpClientOpts {
 export class WeChatAcpClient implements acp.Client {
   private chunks: string[] = [];
   private thoughtChunks: string[] = [];
+  private filter = new StreamingMarkdownFilter();
   private opts: WeChatAcpClientOpts;
   private lastTypingAt = 0;
   private producedMessageThisTurn = false;
@@ -40,6 +45,7 @@ export class WeChatAcpClient implements acp.Client {
   /** Reset per-turn delivery state. Call at the start of each prompt. */
   newTurn(): void {
     this.producedMessageThisTurn = false;
+    this.filter = new StreamingMarkdownFilter();
   }
 
   constructor(opts: WeChatAcpClientOpts) {
@@ -50,12 +56,14 @@ export class WeChatAcpClient implements acp.Client {
     sendTyping: () => Promise<void>;
     onThoughtFlush: (text: string) => Promise<void>;
     onMessageFlush: (text: string) => Promise<void>;
+    onMediaFile: (filePath: string, mimeType: string, fileName?: string) => Promise<void>;
   }): void {
     this.opts = {
       ...this.opts,
       sendTyping: callbacks.sendTyping,
       onThoughtFlush: callbacks.onThoughtFlush,
       onMessageFlush: callbacks.onMessageFlush,
+      onMediaFile: callbacks.onMediaFile,
     };
   }
 
@@ -85,9 +93,48 @@ export class WeChatAcpClient implements acp.Client {
       case "agent_message_chunk":
         await this.maybeFlushThoughts();
         if (update.content.type === "text") {
-          this.chunks.push(update.content.text);
-          if (update.content.text.trim()) {
+          const filtered = this.filter.feed(update.content.text);
+          if (filtered) {
+            this.chunks.push(filtered);
             this.producedMessageThisTurn = true;
+          }
+        } else if (update.content.type === "image") {
+          await this.maybeFlushMessage();
+          const imageContent = update.content as acp.ImageContent;
+          const ext = this.mimeToExt(imageContent.mimeType) ?? ".jpg";
+          const filePath = await this.saveTempFile(
+            Buffer.from(imageContent.data, "base64"),
+            ext,
+          );
+          this.opts.log(`[media] image (${imageContent.data.length} b64 chars) saved to ${filePath}`);
+          await this.sendWithRetry(
+            () => this.opts.onMediaFile(filePath, imageContent.mimeType),
+            "media-image",
+          );
+        } else if (update.content.type === "resource_link") {
+          await this.maybeFlushMessage();
+          const link = update.content as acp.ResourceLink;
+          const localPath = this.resolveLocalPath(link.uri);
+          this.chunks.push(`@sendfile ${localPath}`);
+          this.producedMessageThisTurn = true;
+          this.opts.log(`[media] resource_link -> @sendfile ${localPath}`);
+        } else if (update.content.type === "resource") {
+          await this.maybeFlushMessage();
+          const resource = (update.content as acp.EmbeddedResource).resource;
+          if ("blob" in resource) {
+            const ext = resource.mimeType ? this.mimeToExt(resource.mimeType) : ".bin";
+            const filePath = await this.saveTempFile(
+              Buffer.from(resource.blob, "base64"),
+              ext ?? ".bin",
+            );
+            this.chunks.push(`@sendfile ${filePath}`);
+            this.producedMessageThisTurn = true;
+            this.opts.log(`[media] resource blob -> @sendfile ${filePath}`);
+          } else if ("text" in resource) {
+            this.chunks.push(resource.text);
+            if (resource.text.trim()) {
+              this.producedMessageThisTurn = true;
+            }
           }
         }
         // Throttle typing indicators
@@ -155,6 +202,10 @@ export class WeChatAcpClient implements acp.Client {
         this.opts.onConfigOptionsUpdate?.(update.configOptions);
         this.opts.log(`[config] ${update.configOptions.length} option(s) updated`);
         break;
+
+      default:
+        this.opts.log(`[debug] unhandled sessionUpdate: ${String((update as { sessionUpdate?: string }).sessionUpdate)} content.type=${(update as { content?: { type?: string } }).content?.type}`);
+        break;
     }
   }
 
@@ -182,6 +233,13 @@ export class WeChatAcpClient implements acp.Client {
     // Drain any in-flight sends (queued by maybeFlushMessage) before reading
     // the buffer so a retried-and-restored flush cannot race with this read.
     await this.messageFlushChain.catch(() => {});
+    const filterTail = this.filter.flush();
+    if (filterTail) {
+      this.chunks.push(filterTail);
+      if (filterTail.trim()) {
+        this.producedMessageThisTurn = true;
+      }
+    }
     const text = this.chunks.join("");
     this.chunks = [];
     this.lastTypingAt = 0;
@@ -283,5 +341,39 @@ export class WeChatAcpClient implements acp.Client {
     } catch {
       // typing is best-effort
     }
+  }
+
+  private async saveTempFile(data: Buffer, ext: string): Promise<string> {
+    const name = `wechat-acp-${Date.now()}-${Math.random().toString(16).slice(2, 10)}${ext}`;
+    const filePath = path.join(os.tmpdir(), name);
+    await fs.promises.writeFile(filePath, data);
+    return filePath;
+  }
+
+  private resolveLocalPath(uri: string): string {
+    if (uri.startsWith("file://")) {
+      return decodeURIComponent(uri.slice(7));
+    }
+    return uri;
+  }
+
+  private mimeToExt(mimeType: string): string | undefined {
+    const map: Record<string, string> = {
+      "image/jpeg": ".jpg",
+      "image/png": ".png",
+      "image/gif": ".gif",
+      "image/webp": ".webp",
+      "image/svg+xml": ".svg",
+      "image/bmp": ".bmp",
+      "video/mp4": ".mp4",
+      "video/webm": ".webm",
+      "application/pdf": ".pdf",
+      "application/zip": ".zip",
+      "application/json": ".json",
+      "text/plain": ".txt",
+      "text/markdown": ".md",
+      "text/html": ".html",
+    };
+    return map[mimeType];
   }
 }

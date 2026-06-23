@@ -7,12 +7,14 @@
 
 import type * as acp from "@agentclientprotocol/sdk";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
-import { sendTextMessage, splitText } from "./weixin/send.js";
-import { sendTyping, getConfig } from "./weixin/api.js";
+import { sendTextMessage, splitText, sendImageMessage, sendVideoMessage, sendFileMessage, sendFileBuffer } from "./weixin/send.js";
+import { sendTyping, getConfig, notifyStart, notifyStop } from "./weixin/api.js";
 import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
+import { uploadImage, uploadVideo, uploadFile } from "./weixin/upload.js";
 import { SessionManager } from "./acp/session.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
 import type { WeChatAcpConfig } from "./config.js";
@@ -72,6 +74,10 @@ export class WeChatAcpBridge {
   // messages arriving during the flush wait for the buffered prompt to
   // enqueue first, preserving turn order.
   private bufferFlushing = new Map<string, Promise<void>>();
+  // Deduplicate messages by seq (WeChat may deliver the same message
+  // in consecutive getUpdates batches before the sync_buf advances).
+  private seenSeqs = new Set<number>();
+  private readonly maxSeenSeqs = 500;
   private log: (msg: string) => void;
 
   constructor(config: WeChatAcpConfig, log?: (msg: string) => void) {
@@ -121,12 +127,28 @@ export class WeChatAcpBridge {
       this.log(`Use --login to force re-login`);
     }
 
-    // 2. Create SessionManager
+    // 2. notify WeChat backend that this bot is online
+    try {
+      const resp = await notifyStart({ baseUrl: this.tokenData.baseUrl, token: this.tokenData.token });
+      if (resp.ret !== 0) {
+        this.log(`notifyStart: ret=${resp.ret} errmsg=${resp.errmsg ?? ""}`);
+      }
+    } catch (err) {
+      this.log(`notifyStart failed (ignored): ${String(err)}`);
+    }
+
+    // 3. Create SessionManager
+    // Inject skills path for opencode agents so they can use @sendfile
+    const skillsDir = new URL("../../skills", import.meta.url).pathname;
+    const agentEnv: Record<string, string> = { ...(this.config.agent.env ?? {}) };
+    if (this.config.agent.preset === "opencode") {
+      agentEnv.OPENCODE_CONFIG_CONTENT = JSON.stringify({ skills: { paths: [skillsDir] } });
+    }
     this.sessionManager = new SessionManager({
       agentCommand: this.config.agent.command,
       agentArgs: this.config.agent.args,
       agentCwd: this.config.agent.cwd,
-      agentEnv: this.config.agent.env,
+      agentEnv,
       agentPreset: this.config.agent.preset ?? "raw",
       idleTimeoutMs: this.config.session.idleTimeoutMs,
       maxConcurrentUsers: this.config.session.maxConcurrentUsers,
@@ -135,6 +157,8 @@ export class WeChatAcpBridge {
       log: this.log,
       onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
       sendTyping: (userId, contextToken) => this.sendTypingIndicator(userId, contextToken),
+      onMediaFile: (userId, contextToken, filePath, mimeType, fileName) =>
+        this.sendMediaFile(userId, contextToken, filePath, mimeType, fileName),
     });
     this.sessionManager.start();
 
@@ -162,9 +186,20 @@ export class WeChatAcpBridge {
 
   async stop(): Promise<void> {
     this.log("Stopping bridge...");
+
+    if (this.sessionManager) {
+      this.log("Killing all agent sessions...");
+      await this.sessionManager.stop();
+    }
+
+    if (this.tokenData) {
+      notifyStop({ baseUrl: this.tokenData.baseUrl, token: this.tokenData.token }).catch((err) => {
+        this.log(`notifyStop failed (ignored): ${String(err)}`);
+      });
+    }
+
     this.abortController.abort();
     await this.injectionMonitor?.stop();
-    await this.sessionManager?.stop();
     await this.stateUpdate.catch((err) => {
       this.log(`Failed to flush state before stop: ${String(err)}`);
       trackException(sanitizeStateError(err), "state");
@@ -173,6 +208,18 @@ export class WeChatAcpBridge {
   }
 
   private handleMessage(msg: WeixinMessage): void {
+    if (msg.seq != null && this.seenSeqs.has(msg.seq)) {
+      this.log(`Dedup: skipping duplicate msg seq=${msg.seq}`);
+      return;
+    }
+    if (msg.seq != null) {
+      this.seenSeqs.add(msg.seq);
+      if (this.seenSeqs.size > this.maxSeenSeqs) {
+        const [first] = this.seenSeqs;
+        this.seenSeqs.delete(first!);
+      }
+    }
+
     // Only process user messages (not bot's own messages)
     if (msg.message_type !== MessageType.USER) return;
 
@@ -183,7 +230,7 @@ export class WeChatAcpBridge {
     const contextToken = msg.context_token;
     if (!userId || !contextToken) return;
 
-    this.log(`Message from ${userId}: ${this.previewMessage(msg)}`);
+    this.log(`Message from ${userId} (seq=${msg.seq}): ${this.previewMessage(msg)}`);
     this.rememberActiveUser(userId, contextToken);
 
     trackEvent(
@@ -594,6 +641,12 @@ export class WeChatAcpBridge {
   }
 
   private async sendReply(userId: string, contextToken: string, text: string): Promise<void> {
+    const sendFileMatch = text.match(/^@sendfile\s+(.+)$/m);
+    if (sendFileMatch) {
+      const filePath = sendFileMatch[1]!.trim();
+      return this.sendOriginalFile(userId, contextToken, filePath);
+    }
+
     // Serialize all replies to the same user behind a per-user promise chain so
     // that segments from separate sendReply calls cannot interleave (issue #38).
     // The stored link swallows errors so one failed reply doesn't break the
@@ -607,6 +660,104 @@ export class WeChatAcpBridge {
       current.catch(() => {}),
     );
     return current;
+  }
+
+  private async sendMediaFile(
+    userId: string,
+    contextToken: string,
+    filePath: string,
+    mimeType: string,
+    fileName?: string,
+  ): Promise<void> {
+    this.log(`sendMediaFile: userId=${userId} file=${filePath} mime=${mimeType}`);
+    const opts = {
+      baseUrl: this.tokenData!.baseUrl,
+      token: this.tokenData!.token,
+      contextToken,
+    };
+    const resolvedMime = mimeType || getMimeFromFilename(filePath);
+
+    if (resolvedMime.startsWith("video/")) {
+      const uploaded = await uploadVideo({
+        filePath,
+        toUserId: userId,
+        baseUrl: this.tokenData!.baseUrl,
+        token: this.tokenData!.token,
+        cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+        log: this.log,
+      });
+      await this.paceConsecutiveSend(userId);
+      await sendVideoMessage({ to: userId, text: "", uploaded, opts });
+    } else if (resolvedMime.startsWith("image/")) {
+      const uploaded = await uploadImage({
+        filePath,
+        toUserId: userId,
+        baseUrl: this.tokenData!.baseUrl,
+        token: this.tokenData!.token,
+        cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+        log: this.log,
+      });
+      await this.paceConsecutiveSend(userId);
+      await sendImageMessage({ to: userId, text: "", uploaded, opts });
+    } else {
+      const uploaded = await uploadFile({
+        filePath,
+        toUserId: userId,
+        baseUrl: this.tokenData!.baseUrl,
+        token: this.tokenData!.token,
+        cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+        log: this.log,
+      });
+      const name = fileName || filePath.split("/").pop() || "file";
+      await this.paceConsecutiveSend(userId);
+      await sendFileMessage({ to: userId, text: "", fileName: name, uploaded, opts });
+    }
+
+    this.cancelTypingIndicator(userId, contextToken).catch(() => {});
+  }
+
+  private async sendOriginalFile(
+    userId: string,
+    contextToken: string,
+    filePath: string,
+  ): Promise<void> {
+    this.log(`sendOriginalFile: userId=${userId} file=${filePath}`);
+    let buffer: Buffer;
+    let fileName: string;
+
+    if (filePath.startsWith("http://") || filePath.startsWith("https://")) {
+      const res = await fetch(filePath);
+      if (!res.ok) {
+        await this.sendReply(userId, contextToken, `下载文件失败: HTTP ${res.status}`);
+        return;
+      }
+      buffer = Buffer.from(await res.arrayBuffer());
+      fileName = filePath.split("/").pop() || "download";
+    } else {
+      try {
+        buffer = await fs.readFile(filePath);
+        fileName = filePath.split("/").pop() || "file";
+      } catch (err) {
+        await this.sendReply(userId, contextToken, `读取文件失败: ${String(err)}`);
+        return;
+      }
+    }
+
+    try {
+      await sendFileBuffer(userId, buffer, fileName, {
+        baseUrl: this.tokenData!.baseUrl,
+        token: this.tokenData!.token,
+        contextToken,
+        cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+      });
+      this.log(`sendOriginalFile: sent ${fileName} (${buffer.length} bytes) to ${userId}`);
+    } catch (err) {
+      this.log(`sendOriginalFile: failed: ${String(err)}`);
+      await this.sendReply(userId, contextToken, `发送文件失败: ${String(err)}`);
+      return;
+    }
+
+    this.cancelTypingIndicator(userId, contextToken).catch(() => {});
   }
 
   private async deliverReply(userId: string, contextToken: string, text: string): Promise<void> {
@@ -1003,4 +1154,37 @@ function sanitizeStateError(err: unknown): Error {
   sanitized.name = err instanceof Error ? err.name : "Error";
   sanitized.stack = undefined;
   return sanitized;
+}
+
+function getMimeFromFilename(filePath: string): string {
+  const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+  const map: Record<string, string> = {
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    png: "image/png",
+    gif: "image/gif",
+    webp: "image/webp",
+    bmp: "image/bmp",
+    svg: "image/svg+xml",
+    mp4: "video/mp4",
+    webm: "video/webm",
+    mov: "video/quicktime",
+    avi: "video/x-msvideo",
+    pdf: "application/pdf",
+    zip: "application/zip",
+    gz: "application/gzip",
+    tar: "application/x-tar",
+    doc: "application/msword",
+    docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    xls: "application/vnd.ms-excel",
+    xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ppt: "application/vnd.ms-powerpoint",
+    pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    txt: "text/plain",
+    json: "application/json",
+    md: "text/markdown",
+    html: "text/html",
+    csv: "text/csv",
+  };
+  return map[ext] ?? "application/octet-stream";
 }

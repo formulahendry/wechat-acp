@@ -17,6 +17,7 @@ Bridge WeChat direct messages to any ACP-compatible AI agent.
 - Auto-allow permission requests from the agent
 - Direct message only; group chats are ignored
 - Background daemon mode
+- Agent replies can send files/images to WeChat via `@sendfile` marker
 
 ## Requirements
 
@@ -413,6 +414,12 @@ Watch mode:
 ```bash
 npm run dev
 ```
+
+## Sending Files
+
+When the agent includes `@sendfile /absolute/path/to/file` in its reply, the bridge uploads the file to the WeChat CDN and delivers it as a file message instead of text. Multiple `@sendfile` markers in one reply are supported.
+
+The path must be absolute and readable by the bridge process. This mechanism needs the agent to know about it — for OpenCode, a skill is automatically injected via `OPENCODE_CONFIG_CONTENT` so the agent understands when and how to use `@sendfile`.
 
 ## Telemetry
 

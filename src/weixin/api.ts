@@ -13,6 +13,8 @@ import type {
   GetUploadUrlResp,
   SendTypingReq,
   GetConfigResp,
+  NotifyStartResp,
+  NotifyStopResp,
 } from "./types.js";
 
 const CHANNEL_VERSION = "1.0.2";
@@ -161,15 +163,44 @@ export async function getBotQrcode(params: {
 export async function getQrcodeStatus(params: {
   baseUrl: string;
   qrcode: string;
+  verifyCode?: string;
 }): Promise<{
   status: string;
   bot_token?: string;
   baseurl?: string;
   ilink_bot_id?: string;
   ilink_user_id?: string;
+  redirect_host?: string;
 }> {
-  return apiGet(
+  let qs = `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(params.qrcode)}`;
+  if (params.verifyCode) {
+    qs += `&verify_code=${encodeURIComponent(params.verifyCode)}`;
+  }
+  return apiGet(params.baseUrl, qs);
+}
+
+export async function notifyStart(params: {
+  baseUrl: string;
+  token?: string;
+}): Promise<NotifyStartResp> {
+  return apiPost<NotifyStartResp>(
     params.baseUrl,
-    `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(params.qrcode)}`,
+    "ilink/bot/msg/notifystart",
+    { base_info: buildBaseInfo() },
+    params.token,
+    10_000,
+  );
+}
+
+export async function notifyStop(params: {
+  baseUrl: string;
+  token?: string;
+}): Promise<NotifyStopResp> {
+  return apiPost<NotifyStopResp>(
+    params.baseUrl,
+    "ilink/bot/msg/notifystop",
+    { base_info: buildBaseInfo() },
+    params.token,
+    10_000,
   );
 }
