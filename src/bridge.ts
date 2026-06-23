@@ -7,9 +7,11 @@
 
 import type * as acp from "@agentclientprotocol/sdk";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
-import { sendTextMessage, splitText } from "./weixin/send.js";
+import { sendImageMessage, sendFileMessage, sendTextMessage, splitText } from "./weixin/send.js";
 import { sendTyping, getConfig } from "./weixin/api.js";
 import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
@@ -128,6 +130,7 @@ export class WeChatAcpBridge {
       agentCwd: this.config.agent.cwd,
       agentEnv: this.config.agent.env,
       agentPreset: this.config.agent.preset ?? "raw",
+      agentSystemPrompt: this.config.agent.systemPrompt,
       idleTimeoutMs: this.config.session.idleTimeoutMs,
       maxConcurrentUsers: this.config.session.maxConcurrentUsers,
       showThoughts: this.config.agent.showThoughts,
@@ -666,6 +669,11 @@ export class WeChatAcpBridge {
       );
     }
 
+    // Auto-send media files referenced in reply text (e.g. markdown image links)
+    if (this.config.agent.cwd) {
+      await this.tryAutoSendMedia(userId, contextToken, text);
+    }
+
     trackEvent(
       "reply.sent",
       {
@@ -989,6 +997,186 @@ export class WeChatAcpBridge {
     const slashIndex = value.lastIndexOf("/");
     if (slashIndex >= 0 && slashIndex < value.length - 1) {
       return value.slice(slashIndex + 1);
+    }
+
+    return value;
+  }
+
+  // ── Auto-send media (images / files) referenced in agent reply ────────
+
+  /**
+   * Scan the reply text for file-path references (markdown links and
+   * backtick-enclosed paths), resolve them inside the agent workspace,
+   * and send the corresponding files as WeChat media messages.
+   *
+   * Modeled after codex-wechat's `sendAssistantAttachmentsForReply()` and
+   * `extractAutoSendFilePathsFromReply()`.
+   */
+  private async tryAutoSendMedia(
+    userId: string,
+    contextToken: string,
+    text: string,
+  ): Promise<void> {
+    const mode = this.config.agent.autoSendMedia ?? "all";
+    if (mode === "off") return;
+
+    const cwd = path.resolve(this.config.agent.cwd);
+    const candidates =
+      mode === "tagged"
+        ? this.extractTaggedFilePaths(text)
+        : this.extractFilePathsFromReply(text);
+
+    for (const relPath of candidates) {
+      const fullPath = path.resolve(cwd, relPath);
+
+      // Security: must stay within the agent workspace
+      if (!fullPath.startsWith(cwd + path.sep) && fullPath !== cwd) {
+        continue;
+      }
+
+      let buf: Buffer;
+      try {
+        buf = await fs.readFile(fullPath);
+      } catch {
+        continue;
+      }
+
+      const ext = path.extname(fullPath).toLowerCase();
+      const imageExts = new Set([
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg",
+      ]);
+      const isImage = imageExts.has(ext);
+
+      const opts = {
+        baseUrl: this.tokenData!.baseUrl,
+        token: this.tokenData!.token,
+        contextToken,
+        cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+      };
+
+      try {
+        if (isImage) {
+          await sendImageMessage(userId, buf, opts);
+        } else {
+          await sendFileMessage(userId, path.basename(fullPath), buf, opts);
+        }
+        this.log(
+          `Auto-sent media: ${path.relative(cwd, fullPath)} (${buf.length} bytes)`,
+        );
+      } catch (err) {
+        this.log(
+          `Failed to auto-send media ${path.relative(cwd, fullPath)}: ${String(err)}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Extract file-path candidates from reply text.
+   *
+   * Supports two patterns (matching codex-wechat):
+   *  - Markdown links: `![alt](path)` or `[text](path)`
+   *  - Backtick-enclosed paths: `` `path` ``
+   */
+  private extractFilePathsFromReply(text: string): string[] {
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+
+    // Markdown image / link references
+    const mdLinkRe = /!?\[[^\]]*\]\(([^)\n]+)\)/g;
+    let m: RegExpExecArray | null;
+    while ((m = mdLinkRe.exec(text)) !== null) {
+      const raw = (m[1] ?? "").trim();
+      if (raw) {
+        const cleaned = this.stripPathDecorations(raw);
+        if (cleaned && !seen.has(cleaned)) {
+          seen.add(cleaned);
+          candidates.push(cleaned);
+        }
+      }
+    }
+
+    // Backtick-enclosed paths
+    const btRe = /`([^`\n]+)`/g;
+    while ((m = btRe.exec(text)) !== null) {
+      const raw = (m[1] ?? "").trim();
+      if (raw) {
+        const cleaned = this.stripPathDecorations(raw);
+        if (cleaned && !seen.has(cleaned)) {
+          seen.add(cleaned);
+          candidates.push(cleaned);
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  /**
+   * Extract file-path candidates tagged with `@send:` marker.
+   *
+   * Supports patterns:
+   *  - `@send:path/to/file` — explicit send marker
+   *  - `📎path/to/file` — emoji send marker
+   *
+   * Only these explicitly tagged paths are returned; regular file
+   * references in code discussions are ignored.
+   */
+  private extractTaggedFilePaths(text: string): string[] {
+    const candidates: string[] = [];
+    const seen = new Set<string>();
+
+    // @send: marker
+    const sendRe = /@send:(\S+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = sendRe.exec(text)) !== null) {
+      const raw = (m[1] ?? "").trim();
+      if (raw && !seen.has(raw)) {
+        seen.add(raw);
+        candidates.push(raw);
+      }
+    }
+
+    // 📎 emoji marker
+    const emojiRe = /📎(\S+)/g;
+    while ((m = emojiRe.exec(text)) !== null) {
+      const raw = (m[1] ?? "").trim();
+      if (raw && !seen.has(raw)) {
+        seen.add(raw);
+        candidates.push(raw);
+      }
+    }
+
+    return candidates;
+  }
+
+  /**
+   * Strip decorations from a raw path candidate so it resolves cleanly:
+   *  - `< >` wrapping (auto-linked bare paths on some platforms)
+   *  - `#L…` line references from editor / code-review links
+   *  - `file.ext:line:col` suffixes
+   */
+  private stripPathDecorations(candidate: string): string {
+    let value = candidate.trim();
+    if (!value) return "";
+
+    // Strip <...> wrapping
+    if (value.startsWith("<") && value.endsWith(">")) {
+      value = value.slice(1, -1).trim();
+    }
+
+    // Strip #L... line anchor
+    const hashIdx = value.indexOf("#L");
+    if (hashIdx >= 0) {
+      value = value.slice(0, hashIdx).trim();
+    }
+
+    // Strip :line or :line:col suffix on filenames
+    const lineSuffixMatch = value.match(
+      /^(.*\.[A-Za-z0-9_-]+):\d+(?::\d+)?$/,
+    );
+    if (lineSuffixMatch) {
+      value = lineSuffixMatch[1]!;
     }
 
     return value;

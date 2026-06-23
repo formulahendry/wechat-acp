@@ -3,13 +3,120 @@
  */
 
 import crypto from "node:crypto";
-import { sendMessage } from "./api.js";
-import { MessageType, MessageState } from "./types.js";
+import { getUploadUrl, sendMessage } from "./api.js";
+import { uploadToCdn } from "./media.js";
+import {
+  MessageItemType,
+  MessageState,
+  MessageType,
+  UploadMediaType,
+  type MessageItem,
+} from "./types.js";
 
 export interface WeixinSendOpts {
   baseUrl: string;
   token?: string;
   contextToken?: string;
+}
+
+export interface WeixinMediaSendOpts extends WeixinSendOpts {
+  cdnBaseUrl: string;
+}
+
+export interface UploadedWeixinMedia {
+  filekey: string;
+  downloadEncryptedQueryParam: string;
+  aesKeyHex: string;
+  md5: string;
+  rawSize: number;
+  ciphertextSize: number;
+}
+
+function aesEcbPaddedSize(size: number): number {
+  return Math.ceil((size + 1) / 16) * 16;
+}
+
+function createCdnMedia(uploaded: UploadedWeixinMedia) {
+  return {
+    encrypt_query_param: uploaded.downloadEncryptedQueryParam,
+    aes_key: Buffer.from(uploaded.aesKeyHex).toString("base64"),
+    encrypt_type: 1,
+  };
+}
+
+async function uploadMediaBuffer(params: {
+  to: string;
+  buffer: Buffer;
+  mediaType: (typeof UploadMediaType)[keyof typeof UploadMediaType];
+  opts: WeixinMediaSendOpts;
+}): Promise<UploadedWeixinMedia> {
+  const aesKey = crypto.randomBytes(16);
+  const filekey = crypto.randomBytes(16).toString("hex");
+  const md5 = crypto.createHash("md5").update(params.buffer).digest("hex");
+  const rawSize = params.buffer.length;
+  const ciphertextSize = aesEcbPaddedSize(rawSize);
+
+  const uploadUrl = await getUploadUrl({
+    baseUrl: params.opts.baseUrl,
+    token: params.opts.token,
+    body: {
+      filekey,
+      media_type: params.mediaType,
+      to_user_id: params.to,
+      rawsize: rawSize,
+      rawfilemd5: md5,
+      filesize: ciphertextSize,
+      no_need_thumb: true,
+      aeskey: aesKey.toString("hex"),
+    },
+  });
+
+  const downloadEncryptedQueryParam = await uploadToCdn({
+    buffer: params.buffer,
+    uploadParam: uploadUrl.upload_param,
+    uploadFullUrl: uploadUrl.upload_full_url,
+    aesKey,
+    filekey,
+    cdnBaseUrl: params.opts.cdnBaseUrl,
+  });
+
+  return {
+    filekey,
+    downloadEncryptedQueryParam,
+    aesKeyHex: aesKey.toString("hex"),
+    md5,
+    rawSize,
+    ciphertextSize,
+  };
+}
+
+async function sendMediaMessage(
+  to: string,
+  item: MessageItem,
+  opts: WeixinSendOpts,
+  clientId?: string,
+): Promise<string> {
+  if (!opts.contextToken) {
+    throw new Error("contextToken is required to send a message");
+  }
+
+  const id = clientId ?? `wechat-acp-${crypto.randomUUID()}`;
+  await sendMessage({
+    baseUrl: opts.baseUrl,
+    token: opts.token,
+    body: {
+      msg: {
+        from_user_id: "",
+        to_user_id: to,
+        client_id: id,
+        message_type: MessageType.BOT,
+        message_state: MessageState.FINISH,
+        context_token: opts.contextToken,
+        item_list: [item],
+      },
+    },
+  });
+  return id;
 }
 
 export async function sendTextMessage(
@@ -43,6 +150,71 @@ export async function sendTextMessage(
     },
   });
   return id;
+}
+
+export async function sendImageMessage(
+  to: string,
+  image: Buffer,
+  opts: WeixinMediaSendOpts,
+  clientId?: string,
+): Promise<string> {
+  if (!opts.contextToken) {
+    throw new Error("contextToken is required to send a message");
+  }
+
+  const uploaded = await uploadMediaBuffer({
+    to,
+    buffer: image,
+    mediaType: UploadMediaType.IMAGE,
+    opts,
+  });
+
+  return sendMediaMessage(
+    to,
+    {
+      type: MessageItemType.IMAGE,
+      image_item: {
+        media: createCdnMedia(uploaded),
+        mid_size: uploaded.ciphertextSize,
+      },
+    },
+    opts,
+    clientId,
+  );
+}
+
+export async function sendFileMessage(
+  to: string,
+  fileName: string,
+  file: Buffer,
+  opts: WeixinMediaSendOpts,
+  clientId?: string,
+): Promise<string> {
+  if (!opts.contextToken) {
+    throw new Error("contextToken is required to send a message");
+  }
+
+  const uploaded = await uploadMediaBuffer({
+    to,
+    buffer: file,
+    mediaType: UploadMediaType.FILE,
+    opts,
+  });
+
+  return sendMediaMessage(
+    to,
+    {
+      type: MessageItemType.FILE,
+      file_item: {
+        media: createCdnMedia(uploaded),
+        file_name: fileName,
+        md5: uploaded.md5,
+        len: String(uploaded.rawSize),
+      },
+    },
+    opts,
+    clientId,
+  );
 }
 
 /**

@@ -51,6 +51,7 @@ export interface UserSession {
   processing: boolean;
   lastActivity: number;
   createdAt: number;
+  systemPromptSent: boolean;
 }
 
 export interface SessionManagerOpts {
@@ -59,6 +60,8 @@ export interface SessionManagerOpts {
   agentCwd: string;
   agentEnv?: Record<string, string>;
   agentPreset?: string;
+  /** System prompt prepended to the first message of every new session. */
+  agentSystemPrompt?: string;
   idleTimeoutMs: number;
   maxConcurrentUsers: number;
   showThoughts: boolean;
@@ -114,6 +117,15 @@ export class SessionManager {
 
       session = await this.createSession(userId, message.contextToken);
       this.sessions.set(userId, session);
+
+      // Inject system prompt into the first message of a new session
+      if (this.opts.agentSystemPrompt && !session.systemPromptSent) {
+        message.prompt = [
+          { type: "text", text: this.opts.agentSystemPrompt },
+          ...message.prompt,
+        ];
+        session.systemPromptSent = true;
+      }
     }
 
     // Always update contextToken to the latest
@@ -275,6 +287,7 @@ export class SessionManager {
       processing: false,
       lastActivity: Date.now(),
       createdAt: Date.now(),
+      systemPromptSent: false,
     };
   }
 

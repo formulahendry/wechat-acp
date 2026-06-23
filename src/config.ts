@@ -126,6 +126,28 @@ export interface WeChatAcpConfig {
     env?: Record<string, string>;
     showThoughts: boolean;
     showDiffs?: boolean;
+    /**
+     * System prompt injected at the start of each new agent session.
+     * When set, the text is prepended as the first content block in the
+     * first prompt of every session. Use this to set language preferences,
+     * communication conventions (e.g. file-sharing markers), and context
+     * about the WeChat bridge environment.
+     */
+    systemPrompt?: string;
+    /**
+     * Control auto-send of media files referenced in agent replies.
+     *
+     * - "all":    Current behavior — every markdown link and backtick path
+     *             that resolves to a file inside the agent workspace is
+     *             sent to the user.
+     * - "tagged": Only files explicitly marked with `@send:` (e.g.
+     *             `@send:path/to/file.png`) are sent. Regular file-path
+     *             references in code discussions are ignored.
+     * - "off":    Never auto-send media files.
+     *
+     * @default "all" (backward compatible)
+     */
+    autoSendMedia?: "off" | "tagged" | "all";
   };
   agents: Record<string, AgentPreset>;
   session: {
@@ -196,6 +218,12 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       cwd: process.cwd(),
       showThoughts: true,
       showDiffs: false,
+      autoSendMedia: "tagged",
+      systemPrompt:
+        "你是通过 wechat-acp 桥接与用户微信交流的 AI 助手。" +
+        "请用中文回复，除非用户使用其他语言。" +
+        "如需发送文件或图片给用户，需要将文件或图片拷贝到当前目录，在回复中用 @send:相对路径 标记（例如 @send:test.png），bridge 会自动投递。" +
+        "引用代码时使用 文件:行号 格式，避免误触发文件发送。",
     },
     agents: { ...BUILT_IN_AGENTS },
     session: {
