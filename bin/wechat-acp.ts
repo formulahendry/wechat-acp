@@ -77,6 +77,14 @@ Options:
   --max-sessions <n>  Max concurrent user sessions (default: 10)
   --hide-thoughts     Do not forward agent thinking to WeChat (default: forwarded)
   --show-diffs        Forward ACP file diffs to WeChat (default: hidden)
+  --auto-send-media <mode>
+                      Auto-send media mode: off, tagged, all (default: tagged)
+                        all    - send all file references in replies
+                        tagged - only send @send: tagged files
+                        off    - never auto-send media
+  --system-prompt <text>
+                      System prompt injected at the start of each new session
+                      (e.g. language preference, communication conventions)
   --text <text>       Message text for "inject"
   --file <path>       Read injected message text from a file
   --to <target>       Injection target (default: ${DEFAULT_INJECTION_TARGET})
@@ -136,6 +144,8 @@ function parseArgs(argv: string[]): {
   injectContextToken?: string;
   hideThoughts: boolean;
   showDiffs: boolean;
+  autoSendMedia?: string;
+  systemPrompt?: string;
   verbose: boolean;
   version: boolean;
   help: boolean;
@@ -210,6 +220,12 @@ function parseArgs(argv: string[]): {
         break;
       case "--show-diffs":
         result.showDiffs = true;
+        break;
+      case "--auto-send-media":
+        result.autoSendMedia = args[++i];
+        break;
+      case "--system-prompt":
+        result.systemPrompt = args[++i];
         break;
       case "-v":
       case "--verbose":
@@ -491,6 +507,17 @@ async function main(): Promise<void> {
   if (args.maxSessions) config.session.maxConcurrentUsers = args.maxSessions;
   if (args.hideThoughts) config.agent.showThoughts = false;
   if (args.showDiffs) config.agent.showDiffs = true;
+  if (args.autoSendMedia !== undefined) {
+    const mode = args.autoSendMedia.toLowerCase();
+    if (mode !== "off" && mode !== "tagged" && mode !== "all") {
+      console.error(`Error: invalid --auto-send-media value "${args.autoSendMedia}". Must be: off, tagged, or all.`);
+      process.exit(1);
+    }
+    config.agent.autoSendMedia = mode as "off" | "tagged" | "all";
+  }
+  if (args.systemPrompt !== undefined) {
+    config.agent.systemPrompt = args.systemPrompt;
+  }
   config.daemon.enabled = args.daemon;
 
   // Handle daemon mode

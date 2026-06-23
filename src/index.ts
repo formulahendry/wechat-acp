@@ -22,3 +22,14 @@ export {
 	validateCommandAliases,
 	validateInstanceName,
 } from "./config.js";
+export {
+	sendFileMessage,
+	sendImageMessage,
+	sendTextMessage,
+	splitText,
+} from "./weixin/send.js";
+export type {
+	UploadedWeixinMedia,
+	WeixinMediaSendOpts,
+	WeixinSendOpts,
+} from "./weixin/send.js";

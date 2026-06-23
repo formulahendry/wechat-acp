@@ -51,13 +51,22 @@ export async function downloadAndDecrypt(
 
 export async function uploadToCdn(params: {
   buffer: Buffer;
-  uploadParam: string;
+  uploadParam?: string;
+  uploadFullUrl?: string;
   aesKey: Buffer;
   filekey: string;
   cdnBaseUrl: string;
 }): Promise<string> {
   const encrypted = encryptAesEcb(params.buffer, params.aesKey);
-  const url = `${params.cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(params.uploadParam)}&filekey=${encodeURIComponent(params.filekey)}`;
+  const url = params.uploadFullUrl
+    ?? (
+      params.uploadParam
+        ? `${params.cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(params.uploadParam)}&filekey=${encodeURIComponent(params.filekey)}`
+        : null
+    );
+  if (!url) {
+    throw new Error("CDN upload: uploadParam or uploadFullUrl is required");
+  }
 
   const res = await fetch(url, {
     method: "POST",
