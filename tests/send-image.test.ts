@@ -17,13 +17,12 @@ import {
   sendImageItem,
   type ImageSendDeps,
 } from "../src/weixin/send.js";
-import { parseAesKey, aesEcbPaddedSize } from "../src/weixin/media.js";
+import { parseAesKey, aesEcbPaddedSize, uploadToCdn } from "../src/weixin/media.js";
 import { MessageItemType, UploadMediaType } from "../src/weixin/types.js";
 import type { getUploadUrl as GetUploadUrlFn, sendMessage as SendMessageFn } from "../src/weixin/api.js";
-import type { uploadToCdn as UploadToCdnFn } from "../src/weixin/media.js";
 
 type GetUploadUrlArgs = Parameters<typeof GetUploadUrlFn>[0];
-type UploadArgs = Parameters<typeof UploadToCdnFn>[0];
+type UploadArgs = Parameters<typeof uploadToCdn>[0];
 type SendMessageArgs = Parameters<typeof SendMessageFn>[0];
 
 const IMAGE = Buffer.from("not-really-a-png-but-fine-for-tests");
@@ -178,4 +177,31 @@ test("send retry with reused media is byte-identical and does not re-upload", as
     JSON.parse(JSON.stringify(capture.sends[1].body)),
     "retry payload must be byte-identical to the first attempt",
   );
+});
+
+test("uploadToCdn rejects after timeoutMs when the CDN request hangs", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((_url: unknown, init?: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        const err = new Error("aborted");
+        err.name = "AbortError";
+        reject(err);
+      });
+    })) as typeof fetch;
+  try {
+    await assert.rejects(
+      uploadToCdn({
+        buffer: IMAGE,
+        uploadParam: "param",
+        aesKey: crypto.randomBytes(16),
+        filekey: "f".repeat(32),
+        cdnBaseUrl: "http://fake-cdn/c2c",
+        timeoutMs: 50,
+      }),
+      /CDN upload timed out after 50ms/,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
