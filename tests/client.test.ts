@@ -294,7 +294,11 @@ test("rawOutput fallback is skipped when a standard image content block is prese
 
 test("malformed rawOutput shapes are ignored without throwing", async () => {
   const images: AgentImage[] = [];
-  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  const logs: string[] = [];
+  const client = makeClient({
+    onImageFlush: async (img) => { images.push(img); },
+    log: (m) => { logs.push(m); },
+  });
   client.newTurn();
 
   await emitToolCallRawOutputImage(client, "not an object");
@@ -308,10 +312,14 @@ test("malformed rawOutput shapes are ignored without throwing", async () => {
       { type: "image", data: 123, mimeType: "image/png" },
       { type: "image", data: PNG_BASE64 },
       { type: "image", data: "", mimeType: "image/png" },
+      { type: "image", data: PNG_BASE64, mimeType: "" },
+      { type: "image", data: PNG_BASE64, mimeType: "   " },
     ],
   });
 
   assert.equal(images.length, 0);
+  const imageNotes = logs.filter((l) => l.includes("[images:"));
+  assert.deepEqual(imageNotes, [], "malformed entries must not be counted as images");
 });
 
 test("[tool] log line reports image source: content block vs rawOutput fallback", async () => {

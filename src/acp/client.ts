@@ -286,7 +286,13 @@ export class WeChatAcpClient implements acp.Client {
         data?: unknown;
         mimeType?: unknown;
       };
-      if (type === "image" && typeof data === "string" && data && typeof mimeType === "string") {
+      if (
+        type === "image" &&
+        typeof data === "string" &&
+        data &&
+        typeof mimeType === "string" &&
+        mimeType.trim()
+      ) {
         images++;
         await this.maybeSendImage({ data, mimeType });
       }
