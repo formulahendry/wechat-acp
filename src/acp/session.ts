@@ -7,7 +7,7 @@
 
 import type { ChildProcess } from "node:child_process";
 import type * as acp from "@agentclientprotocol/sdk";
-import { WeChatAcpClient } from "./client.js";
+import { WeChatAcpClient, type AgentImage } from "./client.js";
 import { spawnAgent, killAgent, type AgentProcessInfo } from "./agent-manager.js";
 import { trackEvent, trackException, hashUserId } from "../telemetry/index.js";
 
@@ -63,8 +63,10 @@ export interface SessionManagerOpts {
   maxConcurrentUsers: number;
   showThoughts: boolean;
   showDiffs?: boolean;
+  showImages?: boolean;
   log: (msg: string) => void;
   onReply: (userId: string, contextToken: string, text: string) => Promise<void>;
+  onReplyImage?: (userId: string, contextToken: string, image: AgentImage) => Promise<void>;
   sendTyping: (userId: string, contextToken: string) => Promise<void>;
 }
 
@@ -225,6 +227,9 @@ export class SessionManager {
       sendTyping: () => this.opts.sendTyping(userId, contextToken),
       onThoughtFlush: (text) => this.opts.onReply(userId, contextToken, text),
       onMessageFlush: (text) => this.opts.onReply(userId, contextToken, text),
+      ...(this.opts.onReplyImage
+        ? { onImageFlush: (image: AgentImage) => this.opts.onReplyImage!(userId, contextToken, image) }
+        : {}),
       onConfigOptionsUpdate: (configOptions) => {
         const session = this.sessions.get(userId);
         if (!session || session.client !== client) return;
@@ -234,6 +239,7 @@ export class SessionManager {
       log: (msg) => this.opts.log(`[${userId}] ${msg}`),
       showThoughts: this.opts.showThoughts,
       showDiffs: this.opts.showDiffs ?? false,
+      showImages: this.opts.showImages ?? true,
     });
 
     const agentInfo = await spawnAgent({
@@ -289,6 +295,12 @@ export class SessionManager {
           sendTyping: () => this.opts.sendTyping(session.userId, pending.contextToken),
           onThoughtFlush: (text) => this.opts.onReply(session.userId, pending.contextToken, text),
           onMessageFlush: (text) => this.opts.onReply(session.userId, pending.contextToken, text),
+          ...(this.opts.onReplyImage
+            ? {
+                onImageFlush: (image: AgentImage) =>
+                  this.opts.onReplyImage!(session.userId, pending.contextToken, image),
+              }
+            : {}),
         });
 
         // Reset chunks for the new turn

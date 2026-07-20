@@ -155,6 +155,8 @@ export interface GetUploadUrlReq {
 export interface GetUploadUrlResp {
   upload_param?: string;
   thumb_upload_param?: string;
+  /** Full upload URL returned by the server; preferred over client-side URL construction. */
+  upload_full_url?: string;
 }
 
 export interface SendTypingReq {

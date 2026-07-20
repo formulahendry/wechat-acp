@@ -9,11 +9,13 @@ import type * as acp from "@agentclientprotocol/sdk";
 import crypto from "node:crypto";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
-import { sendTextMessage, splitText } from "./weixin/send.js";
+import { sendTextMessage, uploadImageMedia, sendImageItem, splitText } from "./weixin/send.js";
+import type { UploadedImageMedia } from "./weixin/send.js";
 import { sendTyping, getConfig } from "./weixin/api.js";
 import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
 import { SessionManager } from "./acp/session.js";
+import type { AgentImage } from "./acp/client.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
 import type { WeChatAcpConfig } from "./config.js";
 import { BRIDGE_COMMANDS, resolveCommandAliases, resolveCommandNames } from "./config.js";
@@ -132,8 +134,10 @@ export class WeChatAcpBridge {
       maxConcurrentUsers: this.config.session.maxConcurrentUsers,
       showThoughts: this.config.agent.showThoughts,
       showDiffs: this.config.agent.showDiffs ?? false,
+      showImages: this.config.agent.showImages ?? true,
       log: this.log,
       onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
+      onReplyImage: (userId, contextToken, image) => this.sendImageReply(userId, contextToken, image),
       sendTyping: (userId, contextToken) => this.sendTypingIndicator(userId, contextToken),
     });
     this.sessionManager.start();
@@ -680,6 +684,71 @@ export class WeChatAcpBridge {
 
     // Cancel typing indicator after reply is sent
     this.cancelTypingIndicator(userId, contextToken).catch(() => {});
+  }
+
+  private async sendImageReply(userId: string, contextToken: string, image: AgentImage): Promise<void> {
+    // Ride the same per-user chain as text replies so an image cannot
+    // interleave with the segments of a concurrent text reply.
+    const previous = this.sendChains.get(userId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => this.deliverImage(userId, contextToken, image));
+    this.sendChains.set(
+      userId,
+      current.catch(() => {}),
+    );
+    return current;
+  }
+
+  private async deliverImage(userId: string, contextToken: string, image: AgentImage): Promise<void> {
+    const buffer = Buffer.from(image.data, "base64");
+    const startedAt = Date.now();
+    // Stable idempotency key across attempts. Together with reusing the
+    // uploaded media descriptor below, every send attempt carries a
+    // byte-identical payload, so the iLink gateway can de-duplicate by
+    // client_id without a retry ever referencing different media.
+    const clientId = `wechat-acp-${crypto.randomUUID()}`;
+    const sendOpts = {
+      baseUrl: this.tokenData!.baseUrl,
+      token: this.tokenData!.token,
+      contextToken,
+      cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+    };
+    let media: UploadedImageMedia | null = null;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
+      try {
+        // Upload once; only re-run if a previous attempt failed before the
+        // upload completed. A send-stage failure retries with the same media.
+        media ??= await uploadImageMedia(userId, buffer, sendOpts);
+        await this.paceConsecutiveSend(userId);
+        await sendImageItem(userId, media, sendOpts, clientId);
+        trackEvent(
+          "reply.image.sent",
+          {
+            userIdHash: hashUserId(userId),
+            bytes: buffer.length,
+            mimeType: image.mimeType,
+            durationMs: Date.now() - startedAt,
+          },
+          hashUserId(userId),
+        );
+        this.cancelTypingIndicator(userId, contextToken).catch(() => {});
+        return;
+      } catch (err) {
+        lastError = err;
+        trackException(err, "reply.image", hashUserId(userId));
+        if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));
+        }
+      }
+    }
+
+    // Propagate so the ACP client appends its delivery-failure placeholder.
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`deliverImage: failed after ${SEGMENT_SEND_MAX_ATTEMPTS} attempts`);
   }
 
   /**
