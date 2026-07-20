@@ -244,9 +244,10 @@ export class WeChatAcpClient implements acp.Client {
    * message, preserving stream order: buffered text preceding the image is
    * flushed first, then the image is sent. Runs entirely within one task on
    * the notification queue, so no other notification or flush() can observe
-   * or mutate state mid-delivery. Unsupported or oversized payloads are
-   * logged and skipped; a delivery failure surfaces as a placeholder in the
-   * text stream so the turn never silently loses content.
+   * or mutate state mid-delivery. Unsupported MIME types are logged and
+   * skipped; an oversized payload is logged and replaced with a placeholder
+   * in the text stream, as is a failed delivery, so the turn never silently
+   * loses content.
    */
   private async maybeSendImage(image: { data: string; mimeType: string }): Promise<void> {
     if (this.opts.showImages === false) {
