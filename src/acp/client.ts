@@ -47,9 +47,13 @@ export class WeChatAcpClient implements acp.Client {
   private opts: WeChatAcpClientOpts;
   private lastTypingAt = 0;
   private producedMessageThisTurn = false;
-  // Promise chain serializing onMessageFlush calls so concurrent boundary events
-  // cannot interleave sends (e.g. chunk B reaching WeChat before chunk A).
-  private messageFlushChain: Promise<void> = Promise.resolve();
+  // FIFO task queue serializing all session-notification handling and flush()
+  // reads. The ACP SDK dispatches notifications without awaiting handlers, so
+  // without this two sessionUpdate calls interleave at their first await:
+  // sends can reorder, and flush() can read the buffer while an image send is
+  // still in flight. Slots are reserved synchronously at call time, so queue
+  // order always matches stream order.
+  private taskChain: Promise<void> = Promise.resolve();
   private static readonly TYPING_INTERVAL_MS = 5_000;
   private static readonly SEND_MAX_ATTEMPTS = 3;
   private static readonly SEND_RETRY_BASE_MS = 300;
@@ -102,7 +106,23 @@ export class WeChatAcpClient implements acp.Client {
     };
   }
 
+  /** Run `task` after all previously enqueued tasks. The slot is reserved
+   * synchronously, before the first await, so callers racing into this method
+   * are ordered by call time and nothing can jump the queue. */
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.taskChain.then(task);
+    this.taskChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
   async sessionUpdate(params: acp.SessionNotification): Promise<void> {
+    return this.enqueue(() => this.handleSessionUpdate(params));
+  }
+
+  private async handleSessionUpdate(params: acp.SessionNotification): Promise<void> {
     const update = params.update;
 
     switch (update.sessionUpdate) {
@@ -206,24 +226,27 @@ export class WeChatAcpClient implements acp.Client {
 
   /** Get accumulated text and reset the buffer. Also flushes any remaining thoughts. */
   async flush(): Promise<string> {
-    await this.maybeFlushThoughts();
-    // Drain any in-flight sends (queued by maybeFlushMessage) before reading
-    // the buffer so a retried-and-restored flush cannot race with this read.
-    await this.messageFlushChain.catch(() => {});
-    const text = this.chunks.join("");
-    this.chunks = [];
-    this.lastTypingAt = 0;
-    return text;
+    // Joins the task queue so any in-flight notification work (a pending text
+    // send, an image upload) completes before the buffer is read. This also
+    // guarantees hasProducedMessage is final when flush() resolves, so an
+    // image-only turn is never mistaken for an empty one.
+    return this.enqueue(async () => {
+      await this.maybeFlushThoughts();
+      const text = this.chunks.join("");
+      this.chunks = [];
+      this.lastTypingAt = 0;
+      return text;
+    });
   }
 
   /**
    * Deliver an agent-produced image content block as a native WeChat image
    * message, preserving stream order: buffered text preceding the image is
-   * flushed first, and the image send itself is serialized on the same
-   * mutex chain as message flushes so concurrent notifications cannot
-   * reorder it. Unsupported or oversized payloads are logged and skipped;
-   * a delivery failure surfaces as a placeholder in the text stream so the
-   * turn never silently loses content.
+   * flushed first, then the image is sent. Runs entirely within one task on
+   * the notification queue, so no other notification or flush() can observe
+   * or mutate state mid-delivery. Unsupported or oversized payloads are
+   * logged and skipped; a delivery failure surfaces as a placeholder in the
+   * text stream so the turn never silently loses content.
    */
   private async maybeSendImage(image: { data: string; mimeType: string }): Promise<void> {
     if (this.opts.showImages === false) {
@@ -256,27 +279,19 @@ export class WeChatAcpClient implements acp.Client {
     // segment hit a transient send failure would lose more than it saves.
     await this.maybeFlushMessage();
 
-    const onImageFlush = this.opts.onImageFlush;
-    const prev = this.messageFlushChain;
-    let release!: () => void;
-    this.messageFlushChain = new Promise<void>((r) => {
-      release = r;
-    });
-    await prev.catch(() => {});
-
     try {
       // Single attempt here: the bridge-side sink owns retries (with a stable
       // client_id for gateway de-duplication), so retrying again at this layer
       // would multiply CDN uploads.
-      await onImageFlush(image);
+      await this.opts.onImageFlush(image);
       this.opts.log(`[image] sent (${image.mimeType}, ~${approxBytes} bytes)`);
       this.producedMessageThisTurn = true;
     } catch (err) {
       this.opts.log(`[image] delivery failed: ${String(err)}`);
+      // Queue serialization means no later text has been buffered yet, so the
+      // placeholder lands exactly where the image belonged in the stream.
       this.chunks.push("\n⚠️ [image could not be delivered]\n");
       this.producedMessageThisTurn = true;
-    } finally {
-      release();
     }
   }
 
@@ -298,48 +313,27 @@ export class WeChatAcpClient implements acp.Client {
    * Stream the buffered agent message (and any embedded diffs) as its own
    * WeChat reply. Called at thought/tool_call boundaries so multi-step turns
    * surface narrative segments in order; the final segment is still returned
-   * by `flush()` so the caller can append stop-reason suffixes.
+   * by `flush()` so the caller can append stop-reason suffixes. Always runs
+   * within a task on the notification queue, which guarantees FIFO send
+   * order without needing its own mutex.
    */
   private async maybeFlushMessage(): Promise<void> {
     if (this.chunks.length === 0) return;
     const text = this.chunks.join("");
+    this.chunks = [];
     if (!text.trim()) {
-      this.chunks = [];
       return;
     }
-    // Clear the buffer synchronously BEFORE awaiting so that any concurrent
-    // sessionUpdate calls (the ACP SDK fires notifications without awaiting
-    // handlers) see an empty buffer and skip the flush instead of re-sending
-    // the same text. New chunks arriving during the send are appended to the
-    // now-empty array and flushed at the next boundary.
-    this.chunks = [];
 
-    // Acquire a send slot using a simple mutex chain: each caller saves the
-    // current tail of the chain, replaces it with a new unresolved promise,
-    // and awaits the old tail before sending. This guarantees strict FIFO
-    // ordering — chunk A always reaches WeChat before chunk B even when both
-    // boundary events fire nearly simultaneously.
-    const prev = this.messageFlushChain;
-    let resolve!: () => void;
-    this.messageFlushChain = new Promise<void>((r) => {
-      resolve = r;
-    });
-    await prev.catch(() => {});
-
-    try {
-      const ok = await this.sendWithRetry(() => this.opts.onMessageFlush(text), "message");
-      if (!ok) {
-        // Send failed after all retries. Prepend the unsent text back so the
-        // final flush() returns it and session.ts re-attempts via onReply (which
-        // surfaces failure to the user). Any new chunks appended during the
-        // failed send attempts are preserved after the restored text.
-        this.chunks = [text, ...this.chunks];
-        this.opts.log(
-          `[flush] message send failed after retries; retaining ${text.length} chars for final flush`,
-        );
-      }
-    } finally {
-      resolve();
+    const ok = await this.sendWithRetry(() => this.opts.onMessageFlush(text), "message");
+    if (!ok) {
+      // Send failed after all retries. Prepend the unsent text back so the
+      // final flush() returns it and session.ts re-attempts via onReply (which
+      // surfaces failure to the user).
+      this.chunks = [text, ...this.chunks];
+      this.opts.log(
+        `[flush] message send failed after retries; retaining ${text.length} chars for final flush`,
+      );
     }
   }
 

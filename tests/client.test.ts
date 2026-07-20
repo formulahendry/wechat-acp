@@ -184,9 +184,11 @@ test("failed send retains buffer so final flush delivers the message", async () 
 
 test("two sequential flushes are delivered in order (second waits for first)", async () => {
   /**
-   * Scenario: chunk A is flushed at boundary-1, then chunk B is flushed at
-   * boundary-2 while A's send is still awaiting. The mutex chain must ensure
-   * A completes before B starts, so WeChat always receives A before B.
+   * Scenario: chunk A is flushed at boundary-1, then chunk B arrives and is
+   * flushed at boundary-2 while A's send is still awaiting. The notification
+   * queue must ensure A completes before B starts, so WeChat always receives
+   * A before B. Notifications are deliberately not awaited between emits,
+   * mirroring the ACP SDK's fire-and-forget dispatch.
    */
   const order: string[] = [];
   let releaseA!: () => void;
@@ -205,14 +207,14 @@ test("two sequential flushes are delivered in order (second waits for first)", a
   await emitMessageChunk(client, "chunk A");
   // Fire boundary-1 without awaiting so it blocks on the slow send
   const p1 = emitToolCall(client);
+  // chunk B and boundary-2 queue up behind A's in-flight send
+  const p2 = emitMessageChunk(client, "chunk B");
+  const p3 = emitToolCall(client);
 
-  await emitMessageChunk(client, "chunk B");
-  // Fire boundary-2 — must queue behind A
-  const p2 = emitToolCall(client);
-
-  // Release A's send
+  // Let A's send start, then release it
+  await new Promise((r) => setTimeout(r, 10));
   releaseA();
-  await Promise.all([p1, p2]);
+  await Promise.all([p1, p2, p3]);
 
   assert.deepEqual(order, ["chunk A", "chunk B"], "second message must arrive after first");
 });
@@ -315,4 +317,98 @@ test("image without a configured sink is skipped without throwing", async () => 
   const client = makeClient({});
   await emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
   assert.equal(await client.flush(), "");
+});
+
+test("flush() waits for an unawaited in-flight image before reading the buffer", async () => {
+  /**
+   * The ACP SDK dispatches notifications without awaiting handlers, so the
+   * final flush() can race an image that is still uploading. Regression:
+   * before serialization, flush() resolved while the image was in flight,
+   * hasProducedMessage was still false, and session.ts sent the empty-turn
+   * fallback notice on an image-only turn.
+   */
+  let releaseImage!: () => void;
+  const images: AgentImage[] = [];
+  const client = makeClient({
+    onImageFlush: async (img) => {
+      await new Promise<void>((r) => {
+        releaseImage = r;
+      });
+      images.push(img);
+    },
+  });
+  client.newTurn();
+
+  // Fire-and-forget the image notification, then immediately flush.
+  const notification = emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
+  const flushed = client.flush();
+
+  // Let the image send start, then complete it.
+  await new Promise((r) => setTimeout(r, 10));
+  releaseImage();
+
+  const text = await flushed;
+  await notification;
+
+  assert.equal(images.length, 1, "image must be delivered before flush() resolves");
+  assert.equal(text, "");
+  assert.equal(client.hasProducedMessage, true, "image-only turn must count as produced output");
+});
+
+test("text arriving during an image send cannot overtake it", async () => {
+  let releaseImage!: () => void;
+  const order: string[] = [];
+  const client = makeClient({
+    onMessageFlush: async (t) => {
+      order.push(`text:${t}`);
+    },
+    onImageFlush: async () => {
+      await new Promise<void>((r) => {
+        releaseImage = r;
+      });
+      order.push("image");
+    },
+  });
+
+  const p1 = emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
+  const p2 = emitMessageChunk(client, "after-image");
+  const p3 = emitToolCall(client); // boundary flushes the buffered text
+
+  await new Promise((r) => setTimeout(r, 10));
+  releaseImage();
+  await Promise.all([p1, p2, p3]);
+
+  assert.deepEqual(order, ["image", "text:after-image"]);
+});
+
+test("failure placeholder keeps stream position when text arrives during the image send", async () => {
+  /**
+   * Regression: the failure placeholder used to be appended after any text
+   * that arrived while onImageFlush was pending, reversing the original
+   * image -> text order. Serialized handling buffers later text only after
+   * the image task settles, so the placeholder lands in the image's slot.
+   */
+  let failImage!: (err: Error) => void;
+  const client = makeClient({
+    onImageFlush: async () => {
+      await new Promise<void>((_, reject) => {
+        failImage = reject;
+      });
+    },
+  });
+  client.newTurn();
+
+  const p1 = emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
+  const p2 = emitMessageChunk(client, "after-image");
+
+  await new Promise((r) => setTimeout(r, 10));
+  failImage(new Error("CDN upload failed"));
+  await Promise.all([p1, p2]);
+
+  const text = await client.flush();
+  const placeholderAt = text.indexOf("[image could not be delivered]");
+  const textAt = text.indexOf("after-image");
+  assert.ok(placeholderAt >= 0, "placeholder must be present");
+  assert.ok(textAt >= 0, "later text must be preserved");
+  assert.ok(placeholderAt < textAt, `placeholder must precede later text, got: ${JSON.stringify(text)}`);
 });
