@@ -22,6 +22,7 @@ function makeClient(opts: {
   onImageFlush?: (image: AgentImage) => Promise<void>;
   showImages?: boolean;
   sendDelay?: number;
+  log?: (msg: string) => void;
 }): WeChatAcpClient {
   const { sendDelay = 0 } = opts;
   const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -39,7 +40,7 @@ function makeClient(opts: {
         if (sendDelay) await delay(sendDelay);
       }),
     onImageFlush: opts.onImageFlush,
-    log: () => {},
+    log: opts.log ?? (() => {}),
     showThoughts: false,
     showImages: opts.showImages,
   });
@@ -311,6 +312,27 @@ test("malformed rawOutput shapes are ignored without throwing", async () => {
   });
 
   assert.equal(images.length, 0);
+});
+
+test("[tool] log line reports image source: content block vs rawOutput fallback", async () => {
+  const logs: string[] = [];
+  const client = makeClient({
+    onImageFlush: async () => {},
+    log: (m) => { logs.push(m); },
+  });
+  client.newTurn();
+
+  await emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
+  await emitToolCallRawOutputImage(client, {
+    binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }],
+  });
+  await emitToolCallRawOutputImage(client, { content: "plain text result" });
+
+  const toolLogs = logs.filter((l) => l.startsWith("[tool] tc-"));
+  assert.equal(toolLogs.length, 3);
+  assert.match(toolLogs[0], /\[images: 1 content block\]$/);
+  assert.match(toolLogs[1], /\[images: 1 rawOutput fallback\]$/);
+  assert.match(toolLogs[2], /completed$/, "no image note when the tool produced no image");
 });
 
 test("image in agent_message_chunk is delivered", async () => {

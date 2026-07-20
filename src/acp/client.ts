@@ -160,7 +160,7 @@ export class WeChatAcpClient implements acp.Client {
         break;
 
       case "tool_call_update": {
-        let sawImageContentBlock = false;
+        let imageContentBlocks = 0;
         if (update.status === "completed" && update.content) {
           for (const c of update.content) {
             if (c.type === "diff") {
@@ -179,7 +179,7 @@ export class WeChatAcpClient implements acp.Client {
               this.chunks.push("\n```diff\n" + lines.join("\n") + "\n```\n");
               this.producedMessageThisTurn = true;
             } else if (c.type === "content" && c.content.type === "image") {
-              sawImageContentBlock = true;
+              imageContentBlocks++;
               await this.maybeSendImage(c.content);
             }
           }
@@ -189,11 +189,20 @@ export class WeChatAcpClient implements acp.Client {
         // (formulahendry/wechat-acp issue 55). Fall back to rawOutput only
         // when the standard path produced no image, so an agent that one day
         // populates both fields never delivers the same image twice.
-        if (update.status === "completed" && !sawImageContentBlock) {
-          await this.maybeSendRawOutputImages(update.rawOutput);
+        let rawOutputImages = 0;
+        if (update.status === "completed" && imageContentBlocks === 0) {
+          rawOutputImages = await this.maybeSendRawOutputImages(update.rawOutput);
         }
         if (update.status) {
-          this.opts.log(`[tool] ${update.toolCallId} → ${update.status}`);
+          // Surface where images came from so field issues like issue 55
+          // (image present but in a non-standard location) show up in logs.
+          const imageNote =
+            imageContentBlocks > 0
+              ? ` [images: ${imageContentBlocks} content block]`
+              : rawOutputImages > 0
+                ? ` [images: ${rawOutputImages} rawOutput fallback]`
+                : "";
+          this.opts.log(`[tool] ${update.toolCallId} → ${update.status}${imageNote}`);
         }
         await this.maybeSendTyping();
         break;
@@ -256,16 +265,18 @@ export class WeChatAcpClient implements acp.Client {
    * them in `rawOutput.binaryResultsForLlm[]` as `{type: "image", data,
    * mimeType}` and leaves `update.content` unset (issue 55). The spec types
    * `rawOutput` as `unknown`, so every field is validated before use and
-   * anything malformed is ignored.
+   * anything malformed is ignored. Returns the number of valid image entries
+   * handed to `maybeSendImage`, so the caller can log the delivery source.
    */
-  private async maybeSendRawOutputImages(rawOutput: unknown): Promise<void> {
+  private async maybeSendRawOutputImages(rawOutput: unknown): Promise<number> {
     if (typeof rawOutput !== "object" || rawOutput === null) {
-      return;
+      return 0;
     }
     const bin = (rawOutput as { binaryResultsForLlm?: unknown }).binaryResultsForLlm;
     if (!Array.isArray(bin)) {
-      return;
+      return 0;
     }
+    let images = 0;
     for (const entry of bin) {
       if (typeof entry !== "object" || entry === null) {
         continue;
@@ -276,9 +287,11 @@ export class WeChatAcpClient implements acp.Client {
         mimeType?: unknown;
       };
       if (type === "image" && typeof data === "string" && data && typeof mimeType === "string") {
+        images++;
         await this.maybeSendImage({ data, mimeType });
       }
     }
+    return images;
   }
 
   /**
