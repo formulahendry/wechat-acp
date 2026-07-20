@@ -286,15 +286,12 @@ export class WeChatAcpClient implements acp.Client {
         data?: unknown;
         mimeType?: unknown;
       };
-      if (
-        type === "image" &&
-        typeof data === "string" &&
-        data &&
-        typeof mimeType === "string" &&
-        mimeType.trim()
-      ) {
+      // Normalize once so validation, delivery, and the [tool] image note
+      // all agree on what counts as a usable MIME type.
+      const mime = typeof mimeType === "string" ? mimeType.trim() : "";
+      if (type === "image" && typeof data === "string" && data && mime) {
         images++;
-        await this.maybeSendImage({ data, mimeType });
+        await this.maybeSendImage({ data, mimeType: mime });
       }
     }
     return images;

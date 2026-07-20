@@ -278,6 +278,19 @@ test("Copilot CLI shape: image only in rawOutput.binaryResultsForLlm is delivere
   assert.equal(client.hasProducedMessage, true, "fallback image counts as produced output");
 });
 
+test("rawOutput mimeType with surrounding whitespace is normalized and delivered", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: " image/png " }],
+  });
+
+  assert.equal(images.length, 1);
+  assert.equal(images[0].mimeType, "image/png", "delivered MIME type must be trimmed");
+});
+
 test("rawOutput fallback is skipped when a standard image content block is present", async () => {
   const images: AgentImage[] = [];
   const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
