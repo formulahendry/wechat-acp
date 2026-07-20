@@ -317,16 +317,16 @@ export class WeChatAcpClient implements acp.Client {
     // rawOutput fallback) validates and delivers the same normalized value.
     const mimeType = image.mimeType.trim();
     if (this.opts.showImages === false) {
-      this.opts.log(`[image] skipped (showImages=false, ${image.mimeType})`);
+      this.opts.log(`[image] skipped (showImages=false, ${mimeType})`);
       return;
     }
     if (!this.opts.onImageFlush) {
-      this.opts.log(`[image] skipped (no image sink configured, ${image.mimeType})`);
+      this.opts.log(`[image] skipped (no image sink configured, ${mimeType})`);
       return;
     }
     const mime = mimeType.toLowerCase();
     if (!SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
-      this.opts.log(`[image] skipped unsupported type: ${image.mimeType}`);
+      this.opts.log(`[image] skipped unsupported type: ${mimeType}`);
       return;
     }
     // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes; fine for a cap.
