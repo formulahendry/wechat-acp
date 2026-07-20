@@ -159,7 +159,8 @@ export class WeChatAcpClient implements acp.Client {
         await this.maybeSendTyping();
         break;
 
-      case "tool_call_update":
+      case "tool_call_update": {
+        let imageContentBlocks = 0;
         if (update.status === "completed" && update.content) {
           for (const c of update.content) {
             if (c.type === "diff") {
@@ -178,15 +179,34 @@ export class WeChatAcpClient implements acp.Client {
               this.chunks.push("\n```diff\n" + lines.join("\n") + "\n```\n");
               this.producedMessageThisTurn = true;
             } else if (c.type === "content" && c.content.type === "image") {
+              imageContentBlocks++;
               await this.maybeSendImage(c.content);
             }
           }
         }
+        // Copilot CLI compatibility: the CLI emits tool-result images only in
+        // rawOutput.binaryResultsForLlm and never as ACP image content blocks
+        // (formulahendry/wechat-acp issue 55). Fall back to rawOutput only
+        // when the standard path produced no image, so an agent that one day
+        // populates both fields never delivers the same image twice.
+        let rawOutputImages = 0;
+        if (update.status === "completed" && imageContentBlocks === 0) {
+          rawOutputImages = await this.maybeSendRawOutputImages(update.rawOutput);
+        }
         if (update.status) {
-          this.opts.log(`[tool] ${update.toolCallId} → ${update.status}`);
+          // Surface where images came from so field issues like issue 55
+          // (image present but in a non-standard location) show up in logs.
+          const imageNote =
+            imageContentBlocks > 0
+              ? ` [images: ${imageContentBlocks} content block]`
+              : rawOutputImages > 0
+                ? ` [images: ${rawOutputImages} rawOutput fallback]`
+                : "";
+          this.opts.log(`[tool] ${update.toolCallId} → ${update.status}${imageNote}`);
         }
         await this.maybeSendTyping();
         break;
+      }
 
       case "plan":
         // Log plan entries
@@ -240,6 +260,49 @@ export class WeChatAcpClient implements acp.Client {
   }
 
   /**
+   * Compatibility fallback for agents that emit tool-result images only in
+   * `rawOutput` instead of ACP image content blocks. GitHub Copilot CLI puts
+   * them in `rawOutput.binaryResultsForLlm[]` as `{type: "image", data,
+   * mimeType}` and leaves `update.content` unset (issue 55). The spec types
+   * `rawOutput` as `unknown`, so every field is validated before use and
+   * anything malformed is ignored. Returns the number of valid image entries
+   * handed to `maybeSendImage`, so the caller can log the delivery source.
+   */
+  private async maybeSendRawOutputImages(rawOutput: unknown): Promise<number> {
+    if (typeof rawOutput !== "object" || rawOutput === null) {
+      return 0;
+    }
+    const bin = (rawOutput as { binaryResultsForLlm?: unknown }).binaryResultsForLlm;
+    if (!Array.isArray(bin)) {
+      return 0;
+    }
+    let images = 0;
+    for (const entry of bin) {
+      if (typeof entry !== "object" || entry === null) {
+        continue;
+      }
+      const { type, data, mimeType } = entry as {
+        type?: unknown;
+        data?: unknown;
+        mimeType?: unknown;
+      };
+      // maybeSendImage normalizes the MIME type; here just require it to be
+      // non-blank so blank entries are not counted or logged as images.
+      if (
+        type === "image" &&
+        typeof data === "string" &&
+        data &&
+        typeof mimeType === "string" &&
+        mimeType.trim()
+      ) {
+        images++;
+        await this.maybeSendImage({ data, mimeType });
+      }
+    }
+    return images;
+  }
+
+  /**
    * Deliver an agent-produced image content block as a native WeChat image
    * message, preserving stream order: buffered text preceding the image is
    * flushed first, then the image is sent. Runs entirely within one task on
@@ -250,17 +313,20 @@ export class WeChatAcpClient implements acp.Client {
    * loses content.
    */
   private async maybeSendImage(image: { data: string; mimeType: string }): Promise<void> {
+    // Trim once here so every image path (content block, message chunk,
+    // rawOutput fallback) validates and delivers the same normalized value.
+    const mimeType = image.mimeType.trim();
     if (this.opts.showImages === false) {
-      this.opts.log(`[image] skipped (showImages=false, ${image.mimeType})`);
+      this.opts.log(`[image] skipped (showImages=false, ${mimeType})`);
       return;
     }
     if (!this.opts.onImageFlush) {
-      this.opts.log(`[image] skipped (no image sink configured, ${image.mimeType})`);
+      this.opts.log(`[image] skipped (no image sink configured, ${mimeType})`);
       return;
     }
-    const mime = image.mimeType.toLowerCase();
+    const mime = mimeType.toLowerCase();
     if (!SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
-      this.opts.log(`[image] skipped unsupported type: ${image.mimeType}`);
+      this.opts.log(`[image] skipped unsupported type: ${mimeType}`);
       return;
     }
     // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes; fine for a cap.
@@ -284,8 +350,8 @@ export class WeChatAcpClient implements acp.Client {
       // Single attempt here: the bridge-side sink owns retries (with a stable
       // client_id for gateway de-duplication), so retrying again at this layer
       // would multiply CDN uploads.
-      await this.opts.onImageFlush(image);
-      this.opts.log(`[image] sent (${image.mimeType}, ~${approxBytes} bytes)`);
+      await this.opts.onImageFlush({ data: image.data, mimeType });
+      this.opts.log(`[image] sent (${mimeType}, ~${approxBytes} bytes)`);
       this.producedMessageThisTurn = true;
     } catch (err) {
       this.opts.log(`[image] delivery failed: ${String(err)}`);

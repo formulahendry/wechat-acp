@@ -22,6 +22,7 @@ function makeClient(opts: {
   onImageFlush?: (image: AgentImage) => Promise<void>;
   showImages?: boolean;
   sendDelay?: number;
+  log?: (msg: string) => void;
 }): WeChatAcpClient {
   const { sendDelay = 0 } = opts;
   const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -39,7 +40,7 @@ function makeClient(opts: {
         if (sendDelay) await delay(sendDelay);
       }),
     onImageFlush: opts.onImageFlush,
-    log: () => {},
+    log: opts.log ?? (() => {}),
     showThoughts: false,
     showImages: opts.showImages,
   });
@@ -75,6 +76,23 @@ async function emitToolCallImage(
       toolCallId: "tc-1",
       status: "completed",
       content: [{ type: "content", content: { type: "image", ...image } }],
+    },
+  } as never);
+}
+
+/** Copilot CLI shape: image only in rawOutput.binaryResultsForLlm, no content blocks. */
+async function emitToolCallRawOutputImage(
+  client: WeChatAcpClient,
+  rawOutput: unknown,
+  content?: unknown[],
+): Promise<void> {
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-raw-1",
+      status: "completed",
+      ...(content ? { content } : {}),
+      rawOutput,
     },
   } as never);
 }
@@ -234,6 +252,119 @@ test("image in completed tool_call_update is delivered exactly once with data in
   assert.equal(images[0].data, PNG_BASE64);
   assert.equal(images[0].mimeType, "image/png");
   assert.equal(client.hasProducedMessage, true, "image counts as produced output");
+});
+
+test("Copilot CLI shape: image only in rawOutput.binaryResultsForLlm is delivered", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    content: "Viewed image file successfully.",
+    detailedContent: "Viewed image file at path /tmp/white.png",
+    binaryResultsForLlm: [
+      {
+        type: "image",
+        data: PNG_BASE64,
+        mimeType: "image/png",
+        description: "Image file at path /tmp/white.png",
+      },
+    ],
+  });
+
+  assert.equal(images.length, 1);
+  assert.equal(images[0].data, PNG_BASE64);
+  assert.equal(images[0].mimeType, "image/png");
+  assert.equal(client.hasProducedMessage, true, "fallback image counts as produced output");
+});
+
+test("rawOutput mimeType with surrounding whitespace is normalized and delivered", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: " image/png " }],
+  });
+
+  assert.equal(images.length, 1);
+  assert.equal(images[0].mimeType, "image/png", "delivered MIME type must be trimmed");
+});
+
+test("content-block mimeType with surrounding whitespace is normalized and delivered", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallImage(client, { data: PNG_BASE64, mimeType: " image/PNG " });
+
+  assert.equal(images.length, 1);
+  assert.equal(images[0].mimeType, "image/PNG", "delivered MIME type must be trimmed");
+});
+
+test("rawOutput fallback is skipped when a standard image content block is present", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(
+    client,
+    { binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }] },
+    [{ type: "content", content: { type: "image", data: PNG_BASE64, mimeType: "image/png" } }],
+  );
+
+  assert.equal(images.length, 1, "image must be delivered exactly once, not per source");
+});
+
+test("malformed rawOutput shapes are ignored without throwing", async () => {
+  const images: AgentImage[] = [];
+  const logs: string[] = [];
+  const client = makeClient({
+    onImageFlush: async (img) => { images.push(img); },
+    log: (m) => { logs.push(m); },
+  });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, "not an object");
+  await emitToolCallRawOutputImage(client, null);
+  await emitToolCallRawOutputImage(client, { binaryResultsForLlm: "not an array" });
+  await emitToolCallRawOutputImage(client, {
+    binaryResultsForLlm: [
+      null,
+      "string entry",
+      { type: "text", text: "not an image" },
+      { type: "image", data: 123, mimeType: "image/png" },
+      { type: "image", data: PNG_BASE64 },
+      { type: "image", data: "", mimeType: "image/png" },
+      { type: "image", data: PNG_BASE64, mimeType: "" },
+      { type: "image", data: PNG_BASE64, mimeType: "   " },
+    ],
+  });
+
+  assert.equal(images.length, 0);
+  const imageNotes = logs.filter((l) => l.includes("[images:"));
+  assert.deepEqual(imageNotes, [], "malformed entries must not be counted as images");
+});
+
+test("[tool] log line reports image source: content block vs rawOutput fallback", async () => {
+  const logs: string[] = [];
+  const client = makeClient({
+    onImageFlush: async () => {},
+    log: (m) => { logs.push(m); },
+  });
+  client.newTurn();
+
+  await emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
+  await emitToolCallRawOutputImage(client, {
+    binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }],
+  });
+  await emitToolCallRawOutputImage(client, { content: "plain text result" });
+
+  const toolLogs = logs.filter((l) => l.startsWith("[tool] tc-"));
+  assert.equal(toolLogs.length, 3);
+  assert.match(toolLogs[0], /\[images: 1 content block\]$/);
+  assert.match(toolLogs[1], /\[images: 1 rawOutput fallback\]$/);
+  assert.match(toolLogs[2], /completed$/, "no image note when the tool produced no image");
 });
 
 test("image in agent_message_chunk is delivered", async () => {
