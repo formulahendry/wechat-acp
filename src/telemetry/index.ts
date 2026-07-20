@@ -36,7 +36,8 @@ export type EventName =
   | "command.buffer_done"
   | "session.created"
   | "prompt.completed"
-  | "reply.sent";
+  | "reply.sent"
+  | "reply.image.sent";
 
 type PropValue = string | number | boolean;
 

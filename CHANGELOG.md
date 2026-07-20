@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Render ACP `image` content blocks from the agent (in `agent_message_chunk` and completed `tool_call_update` content) as native WeChat image messages, instead of silently dropping them. Images are uploaded to the WeChat CDN (AES-128-ECB, `getuploadurl` + `sendmessage` with an `image_item`) and delivered in stream order relative to surrounding text via the existing per-client flush chain and per-user reply queue. Supported types: png, jpeg, gif, webp, bmp; images above 10 MiB or with other MIME types are skipped with a log line; a failed delivery surfaces as an `[image could not be delivered]` placeholder in the text reply. Enabled by default; disable with `--hide-images` or `agent.showImages: false`. Adds one telemetry event: `reply.image.sent`. Fixes #52.
+
 ## 0.8.0
 
 - Hide ACP file diffs by default. Use `--show-diffs` or `agent.showDiffs: true` to forward diffs to WeChat.

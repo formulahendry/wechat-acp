@@ -16,6 +16,11 @@ export function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
   return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
+/** Compute AES-128-ECB ciphertext size (PKCS7 padding to a 16-byte boundary). */
+export function aesEcbPaddedSize(plaintextSize: number): number {
+  return Math.ceil((plaintextSize + 1) / 16) * 16;
+}
+
 /**
  * Parse the AES key from CDN media reference.
  * The key can be either:
@@ -51,13 +56,23 @@ export async function downloadAndDecrypt(
 
 export async function uploadToCdn(params: {
   buffer: Buffer;
-  uploadParam: string;
+  uploadParam?: string;
+  /** Full upload URL from getUploadUrl; takes precedence over uploadParam when set. */
+  uploadFullUrl?: string;
   aesKey: Buffer;
   filekey: string;
   cdnBaseUrl: string;
 }): Promise<string> {
   const encrypted = encryptAesEcb(params.buffer, params.aesKey);
-  const url = `${params.cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(params.uploadParam)}&filekey=${encodeURIComponent(params.filekey)}`;
+  const fullUrl = params.uploadFullUrl?.trim();
+  let url: string;
+  if (fullUrl) {
+    url = fullUrl;
+  } else if (params.uploadParam) {
+    url = `${params.cdnBaseUrl}/upload?encrypted_query_param=${encodeURIComponent(params.uploadParam)}&filekey=${encodeURIComponent(params.filekey)}`;
+  } else {
+    throw new Error("CDN upload: need uploadFullUrl or uploadParam");
+  }
 
   const res = await fetch(url, {
     method: "POST",

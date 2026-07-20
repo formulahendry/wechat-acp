@@ -126,6 +126,12 @@ export interface WeChatAcpConfig {
     env?: Record<string, string>;
     showThoughts: boolean;
     showDiffs?: boolean;
+    /**
+     * Render agent-produced ACP `image` content blocks as native WeChat
+     * image messages. Defaults to `true`; set to `false` (or pass
+     * `--hide-images`) to drop them.
+     */
+    showImages?: boolean;
   };
   agents: Record<string, AgentPreset>;
   session: {
@@ -196,6 +202,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       cwd: process.cwd(),
       showThoughts: true,
       showDiffs: false,
+      showImages: true,
     },
     agents: { ...BUILT_IN_AGENTS },
     session: {

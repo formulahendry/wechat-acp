@@ -14,6 +14,7 @@ Bridge WeChat direct messages to any ACP-compatible AI agent.
 - One ACP agent session per WeChat user
 - Built-in ACP agent presets for common CLIs
 - Custom raw agent command support
+- Agent image output delivered as native WeChat image messages
 - Auto-allow permission requests from the agent
 - Direct message only; group chats are ignored
 - Background daemon mode
@@ -103,6 +104,7 @@ Options:
 - `--no-inbox`: do not save received files; the agent only sees a size notice.
 - `--hide-thoughts`: do not forward agent thinking to WeChat (default: forwarded)
 - `--show-diffs`: forward ACP file diffs to WeChat (default: hidden)
+- `--hide-images`: do not forward agent image output to WeChat (default: forwarded)
 - `inject --text <text>`: enqueue a local text message for the running daemon
 - `-V, --version`: print version and exit
 - `-h, --help`: show help
@@ -438,8 +440,9 @@ WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 - `session.created` — new ACP session opened
 - `prompt.completed` — ACP turn finished; agent preset, stop reason, duration, reply length
 - `reply.sent` — reply pushed back to WeChat; segment count, total length
+- `reply.image.sent`: image reply pushed back to WeChat; byte size, MIME type, duration
 
-Plus exception reports for `monitor`, `prompt`, `reply`, `auth`, `agent_spawn`, `enqueue`, `buffer`, `command`, and `state` failures.
+Plus exception reports for `monitor`, `prompt`, `reply`, `reply.image`, `auth`, `agent_spawn`, `enqueue`, `buffer`, `command`, and `state` failures.
 
 **What is never collected**: message bodies, filenames, voice transcripts, image URLs, login tokens, QR codes, raw agent command strings, environment variables, working directory paths, raw WeChat user IDs.
 

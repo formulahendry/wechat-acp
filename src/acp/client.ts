@@ -9,14 +9,36 @@
 import fs from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
 
+/** An image content block produced by the agent, ready for outbound delivery. */
+export interface AgentImage {
+  /** Base64-encoded image bytes. */
+  data: string;
+  mimeType: string;
+}
+
+/** Raster formats WeChat can render as native image messages. */
+const SUPPORTED_IMAGE_MIME_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/gif",
+  "image/webp",
+  "image/bmp",
+]);
+
+/** Sanity cap on decoded image size (10 MiB). */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
 export interface WeChatAcpClientOpts {
   sendTyping: () => Promise<void>;
   onThoughtFlush: (text: string) => Promise<void>;
   onMessageFlush: (text: string) => Promise<void>;
+  onImageFlush?: (image: AgentImage) => Promise<void>;
   onConfigOptionsUpdate?: (configOptions: acp.SessionConfigOption[]) => void;
   log: (msg: string) => void;
   showThoughts: boolean;
   showDiffs?: boolean;
+  showImages?: boolean;
 }
 
 export class WeChatAcpClient implements acp.Client {
@@ -50,12 +72,14 @@ export class WeChatAcpClient implements acp.Client {
     sendTyping: () => Promise<void>;
     onThoughtFlush: (text: string) => Promise<void>;
     onMessageFlush: (text: string) => Promise<void>;
+    onImageFlush?: (image: AgentImage) => Promise<void>;
   }): void {
     this.opts = {
       ...this.opts,
       sendTyping: callbacks.sendTyping,
       onThoughtFlush: callbacks.onThoughtFlush,
       onMessageFlush: callbacks.onMessageFlush,
+      ...(callbacks.onImageFlush ? { onImageFlush: callbacks.onImageFlush } : {}),
     };
   }
 
@@ -89,6 +113,8 @@ export class WeChatAcpClient implements acp.Client {
           if (update.content.text.trim()) {
             this.producedMessageThisTurn = true;
           }
+        } else if (update.content.type === "image") {
+          await this.maybeSendImage(update.content);
         }
         // Throttle typing indicators
         await this.maybeSendTyping();
@@ -131,6 +157,8 @@ export class WeChatAcpClient implements acp.Client {
               }
               this.chunks.push("\n```diff\n" + lines.join("\n") + "\n```\n");
               this.producedMessageThisTurn = true;
+            } else if (c.type === "content" && c.content.type === "image") {
+              await this.maybeSendImage(c.content);
             }
           }
         }
@@ -186,6 +214,65 @@ export class WeChatAcpClient implements acp.Client {
     this.chunks = [];
     this.lastTypingAt = 0;
     return text;
+  }
+
+  /**
+   * Deliver an agent-produced image content block as a native WeChat image
+   * message, preserving stream order: buffered text preceding the image is
+   * flushed first, and the image send itself is serialized on the same
+   * mutex chain as message flushes so concurrent notifications cannot
+   * reorder it. Unsupported or oversized payloads are logged and skipped;
+   * a delivery failure surfaces as a placeholder in the text stream so the
+   * turn never silently loses content.
+   */
+  private async maybeSendImage(image: { data: string; mimeType: string }): Promise<void> {
+    if (this.opts.showImages === false) {
+      this.opts.log(`[image] skipped (showImages=false, ${image.mimeType})`);
+      return;
+    }
+    if (!this.opts.onImageFlush) {
+      this.opts.log(`[image] skipped (no image sink configured, ${image.mimeType})`);
+      return;
+    }
+    const mime = image.mimeType.toLowerCase();
+    if (!SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
+      this.opts.log(`[image] skipped unsupported type: ${image.mimeType}`);
+      return;
+    }
+    // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes; fine for a cap.
+    const approxBytes = Math.ceil(image.data.length / 4) * 3;
+    if (approxBytes > MAX_IMAGE_BYTES) {
+      this.opts.log(`[image] skipped oversized image (~${approxBytes} bytes > ${MAX_IMAGE_BYTES})`);
+      this.chunks.push("\n⚠️ [image too large to deliver]\n");
+      this.producedMessageThisTurn = true;
+      return;
+    }
+
+    // Flush any text buffered before this image so ordering is preserved.
+    await this.maybeFlushMessage();
+
+    const onImageFlush = this.opts.onImageFlush;
+    const prev = this.messageFlushChain;
+    let release!: () => void;
+    this.messageFlushChain = new Promise<void>((r) => {
+      release = r;
+    });
+    await prev.catch(() => {});
+
+    try {
+      // Single attempt here: the bridge-side sink owns retries (with a stable
+      // client_id for gateway de-duplication), so retrying again at this layer
+      // would multiply CDN uploads.
+      await onImageFlush(image);
+      this.opts.log(`[image] sent (${image.mimeType}, ~${approxBytes} bytes)`);
+      this.producedMessageThisTurn = true;
+    } catch (err) {
+      this.opts.log(`[image] delivery failed: ${String(err)}`);
+      this.chunks.push("\n⚠️ [image could not be delivered]\n");
+      this.producedMessageThisTurn = true;
+    } finally {
+      release();
+    }
   }
 
   private async maybeFlushThoughts(): Promise<void> {
