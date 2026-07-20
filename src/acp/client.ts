@@ -249,6 +249,11 @@ export class WeChatAcpClient implements acp.Client {
     }
 
     // Flush any text buffered before this image so ordering is preserved.
+    // Degraded mode: if that flush fails after its retries, the text is
+    // re-buffered for the final flush() and the image is still delivered
+    // now. Strict ordering is knowingly traded for content preservation
+    // here; dropping or deferring a deliverable image because a text
+    // segment hit a transient send failure would lose more than it saves.
     await this.maybeFlushMessage();
 
     const onImageFlush = this.opts.onImageFlush;

@@ -11,7 +11,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
-import { sendImageMessage, type ImageSendDeps } from "../src/weixin/send.js";
+import {
+  sendImageMessage,
+  uploadImageMedia,
+  sendImageItem,
+  type ImageSendDeps,
+} from "../src/weixin/send.js";
 import { parseAesKey, aesEcbPaddedSize } from "../src/weixin/media.js";
 import { MessageItemType, UploadMediaType } from "../src/weixin/types.js";
 import type { getUploadUrl as GetUploadUrlFn, sendMessage as SendMessageFn } from "../src/weixin/api.js";
@@ -135,5 +140,42 @@ test("sendImageMessage fails fast when no upload URL is returned", async () => {
   await assert.rejects(
     () => sendImageMessage("user123", IMAGE, OPTS, undefined, deps),
     /no upload URL/,
+  );
+});
+
+test("send retry with reused media is byte-identical and does not re-upload", async () => {
+  /**
+   * Retry semantics used by deliverImage in bridge.ts: upload once via
+   * uploadImageMedia, then retry only sendImageItem with the same media
+   * descriptor and client_id. Every attempt must serialize to an identical
+   * message so the iLink gateway can de-duplicate by client_id without a
+   * retry ever carrying different media metadata.
+   */
+  const capture = { uploadUrlReqs: [], uploads: [], sends: [] } as Parameters<typeof makeDeps>[0];
+  const deps = makeDeps(capture);
+
+  const media = await uploadImageMedia("user123", IMAGE, OPTS, deps);
+  assert.equal(capture.uploads.length, 1, "exactly one upload");
+
+  let sendCalls = 0;
+  const flakySend: NonNullable<ImageSendDeps["sendFn"]> = async (args) => {
+    capture.sends.push(args);
+    sendCalls++;
+    if (sendCalls === 1) throw new Error("connection reset");
+  };
+
+  const stableId = "wechat-acp-image-retry-id";
+  await assert.rejects(
+    () => sendImageItem("user123", media, OPTS, stableId, flakySend),
+    /connection reset/,
+  );
+  await sendImageItem("user123", media, OPTS, stableId, flakySend);
+
+  assert.equal(capture.uploads.length, 1, "retry must not re-upload");
+  assert.equal(capture.sends.length, 2);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(capture.sends[0].body)),
+    JSON.parse(JSON.stringify(capture.sends[1].body)),
+    "retry payload must be byte-identical to the first attempt",
   );
 });

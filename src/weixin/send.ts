@@ -60,33 +60,36 @@ export interface WeixinImageSendOpts extends WeixinSendOpts {
 }
 
 /**
- * Upload an image to the WeChat CDN and send it as a native image message.
- *
- * Protocol (mirrors @tencent-weixin/openclaw-weixin):
- *   - random 16-byte AES key + 32-hex-char filekey
- *   - getuploadurl with media_type=IMAGE, plaintext md5/size, padded ciphertext size
- *   - AES-128-ECB encrypt + CDN POST; download param comes back via x-encrypted-param
- *   - sendmessage with image_item.media { encrypt_query_param, aes_key, encrypt_type: 1 }
- *     where aes_key is the base64 of the hex-encoded key string (the same convention
- *     parseAesKey() decodes on the inbound path) and mid_size is the ciphertext size.
- *
- * Returns the client_id used, so callers can retry with the same id for
- * gateway de-duplication.
+ * CDN media descriptor for an uploaded image, ready to be attached to an
+ * `image_item`. Stable across send retries: callers that retry a failed
+ * send reuse the same descriptor (and the same `client_id`) so every
+ * attempt carries a byte-identical payload and the iLink gateway can
+ * safely de-duplicate.
  */
-export async function sendImageMessage(
+export interface UploadedImageMedia {
+  encrypt_query_param: string;
+  /** Base64 of the hex-encoded AES key, the convention parseAesKey() decodes. */
+  aes_key: string;
+  /** Ciphertext size (PKCS7-padded), reported as mid_size. */
+  mid_size: number;
+}
+
+/**
+ * Upload an image to the WeChat CDN: random 16-byte AES key + 32-hex-char
+ * filekey, getuploadurl with media_type=IMAGE, plaintext md5/size, padded
+ * ciphertext size, then AES-128-ECB encrypt + CDN POST. The download param
+ * comes back via the x-encrypted-param response header.
+ *
+ * Protocol mirrors @tencent-weixin/openclaw-weixin.
+ */
+export async function uploadImageMedia(
   to: string,
   image: Buffer,
   opts: WeixinImageSendOpts,
-  clientId?: string,
   deps?: ImageSendDeps,
-): Promise<string> {
-  if (!opts.contextToken) {
-    throw new Error("contextToken is required to send a message");
-  }
-
+): Promise<UploadedImageMedia> {
   const getUploadUrlFn = deps?.getUploadUrlFn ?? getUploadUrl;
   const uploadFn = deps?.uploadFn ?? uploadToCdn;
-  const sendFn = deps?.sendFn ?? sendMessage;
 
   const rawsize = image.length;
   const rawfilemd5 = crypto.createHash("md5").update(image).digest("hex");
@@ -122,6 +125,34 @@ export async function sendImageMessage(
     cdnBaseUrl: opts.cdnBaseUrl,
   });
 
+  return {
+    encrypt_query_param: downloadParam,
+    // aes_key is the base64 of the ASCII hex string, the same convention
+    // parseAesKey() decodes on the inbound path.
+    aes_key: Buffer.from(aesKey.toString("hex")).toString("base64"),
+    mid_size: filesize,
+  };
+}
+
+/**
+ * Send an already-uploaded image as a native image message. Retry-safe:
+ * with the same `media` and `clientId`, every attempt sends a byte-identical
+ * message, so the iLink gateway de-duplicates by client_id without any risk
+ * of the retry carrying different media metadata.
+ *
+ * Returns the client_id used.
+ */
+export async function sendImageItem(
+  to: string,
+  media: UploadedImageMedia,
+  opts: WeixinSendOpts,
+  clientId?: string,
+  sendFn: typeof sendMessage = sendMessage,
+): Promise<string> {
+  if (!opts.contextToken) {
+    throw new Error("contextToken is required to send a message");
+  }
+
   const id = clientId ?? `wechat-acp-${crypto.randomUUID()}`;
   await sendFn({
     baseUrl: opts.baseUrl,
@@ -139,11 +170,11 @@ export async function sendImageMessage(
             type: MessageItemType.IMAGE,
             image_item: {
               media: {
-                encrypt_query_param: downloadParam,
-                aes_key: Buffer.from(aesKey.toString("hex")).toString("base64"),
+                encrypt_query_param: media.encrypt_query_param,
+                aes_key: media.aes_key,
                 encrypt_type: 1,
               },
-              mid_size: filesize,
+              mid_size: media.mid_size,
             },
           },
         ],
@@ -151,6 +182,29 @@ export async function sendImageMessage(
     },
   });
   return id;
+}
+
+/**
+ * Upload an image to the WeChat CDN and send it as a native image message
+ * in one shot. Convenience composition of {@link uploadImageMedia} +
+ * {@link sendImageItem}; callers that retry should use the two steps
+ * separately so a send retry reuses the uploaded media instead of
+ * re-running the whole pipeline (see deliverImage in bridge.ts).
+ *
+ * Returns the client_id used.
+ */
+export async function sendImageMessage(
+  to: string,
+  image: Buffer,
+  opts: WeixinImageSendOpts,
+  clientId?: string,
+  deps?: ImageSendDeps,
+): Promise<string> {
+  if (!opts.contextToken) {
+    throw new Error("contextToken is required to send a message");
+  }
+  const media = await uploadImageMedia(to, image, opts, deps);
+  return sendImageItem(to, media, opts, clientId, deps?.sendFn);
 }
 
 /**

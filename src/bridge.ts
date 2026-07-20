@@ -9,7 +9,8 @@ import type * as acp from "@agentclientprotocol/sdk";
 import crypto from "node:crypto";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
-import { sendTextMessage, sendImageMessage, splitText } from "./weixin/send.js";
+import { sendTextMessage, uploadImageMedia, sendImageItem, splitText } from "./weixin/send.js";
+import type { UploadedImageMedia } from "./weixin/send.js";
 import { sendTyping, getConfig } from "./weixin/api.js";
 import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
@@ -702,26 +703,27 @@ export class WeChatAcpBridge {
   private async deliverImage(userId: string, contextToken: string, image: AgentImage): Promise<void> {
     const buffer = Buffer.from(image.data, "base64");
     const startedAt = Date.now();
-    // Stable idempotency key across attempts; the iLink gateway de-duplicates
-    // the send-message call by client_id (the CDN upload preceding it is
-    // harmless to repeat).
+    // Stable idempotency key across attempts. Together with reusing the
+    // uploaded media descriptor below, every send attempt carries a
+    // byte-identical payload, so the iLink gateway can de-duplicate by
+    // client_id without a retry ever referencing different media.
     const clientId = `wechat-acp-${crypto.randomUUID()}`;
+    const sendOpts = {
+      baseUrl: this.tokenData!.baseUrl,
+      token: this.tokenData!.token,
+      contextToken,
+      cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+    };
+    let media: UploadedImageMedia | null = null;
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
       try {
+        // Upload once; only re-run if a previous attempt failed before the
+        // upload completed. A send-stage failure retries with the same media.
+        media ??= await uploadImageMedia(userId, buffer, sendOpts);
         await this.paceConsecutiveSend(userId);
-        await sendImageMessage(
-          userId,
-          buffer,
-          {
-            baseUrl: this.tokenData!.baseUrl,
-            token: this.tokenData!.token,
-            contextToken,
-            cdnBaseUrl: this.config.wechat.cdnBaseUrl,
-          },
-          clientId,
-        );
+        await sendImageItem(userId, media, sendOpts, clientId);
         trackEvent(
           "reply.image.sent",
           {
