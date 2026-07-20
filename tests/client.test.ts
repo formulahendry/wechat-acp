@@ -79,6 +79,23 @@ async function emitToolCallImage(
   } as never);
 }
 
+/** Copilot CLI shape: image only in rawOutput.binaryResultsForLlm, no content blocks. */
+async function emitToolCallRawOutputImage(
+  client: WeChatAcpClient,
+  rawOutput: unknown,
+  content?: unknown[],
+): Promise<void> {
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-raw-1",
+      status: "completed",
+      ...(content ? { content } : {}),
+      rawOutput,
+    },
+  } as never);
+}
+
 async function emitMessageChunkImage(
   client: WeChatAcpClient,
   image: { data: string; mimeType: string },
@@ -234,6 +251,66 @@ test("image in completed tool_call_update is delivered exactly once with data in
   assert.equal(images[0].data, PNG_BASE64);
   assert.equal(images[0].mimeType, "image/png");
   assert.equal(client.hasProducedMessage, true, "image counts as produced output");
+});
+
+test("Copilot CLI shape: image only in rawOutput.binaryResultsForLlm is delivered", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    content: "Viewed image file successfully.",
+    detailedContent: "Viewed image file at path /tmp/white.png",
+    binaryResultsForLlm: [
+      {
+        type: "image",
+        data: PNG_BASE64,
+        mimeType: "image/png",
+        description: "Image file at path /tmp/white.png",
+      },
+    ],
+  });
+
+  assert.equal(images.length, 1);
+  assert.equal(images[0].data, PNG_BASE64);
+  assert.equal(images[0].mimeType, "image/png");
+  assert.equal(client.hasProducedMessage, true, "fallback image counts as produced output");
+});
+
+test("rawOutput fallback is skipped when a standard image content block is present", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(
+    client,
+    { binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }] },
+    [{ type: "content", content: { type: "image", data: PNG_BASE64, mimeType: "image/png" } }],
+  );
+
+  assert.equal(images.length, 1, "image must be delivered exactly once, not per source");
+});
+
+test("malformed rawOutput shapes are ignored without throwing", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, "not an object");
+  await emitToolCallRawOutputImage(client, null);
+  await emitToolCallRawOutputImage(client, { binaryResultsForLlm: "not an array" });
+  await emitToolCallRawOutputImage(client, {
+    binaryResultsForLlm: [
+      null,
+      "string entry",
+      { type: "text", text: "not an image" },
+      { type: "image", data: 123, mimeType: "image/png" },
+      { type: "image", data: PNG_BASE64 },
+      { type: "image", data: "", mimeType: "image/png" },
+    ],
+  });
+
+  assert.equal(images.length, 0);
 });
 
 test("image in agent_message_chunk is delivered", async () => {

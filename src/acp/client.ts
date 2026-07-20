@@ -159,7 +159,8 @@ export class WeChatAcpClient implements acp.Client {
         await this.maybeSendTyping();
         break;
 
-      case "tool_call_update":
+      case "tool_call_update": {
+        let sawImageContentBlock = false;
         if (update.status === "completed" && update.content) {
           for (const c of update.content) {
             if (c.type === "diff") {
@@ -178,15 +179,25 @@ export class WeChatAcpClient implements acp.Client {
               this.chunks.push("\n```diff\n" + lines.join("\n") + "\n```\n");
               this.producedMessageThisTurn = true;
             } else if (c.type === "content" && c.content.type === "image") {
+              sawImageContentBlock = true;
               await this.maybeSendImage(c.content);
             }
           }
+        }
+        // Copilot CLI compatibility: the CLI emits tool-result images only in
+        // rawOutput.binaryResultsForLlm and never as ACP image content blocks
+        // (formulahendry/wechat-acp issue 55). Fall back to rawOutput only
+        // when the standard path produced no image, so an agent that one day
+        // populates both fields never delivers the same image twice.
+        if (update.status === "completed" && !sawImageContentBlock) {
+          await this.maybeSendRawOutputImages(update.rawOutput);
         }
         if (update.status) {
           this.opts.log(`[tool] ${update.toolCallId} → ${update.status}`);
         }
         await this.maybeSendTyping();
         break;
+      }
 
       case "plan":
         // Log plan entries
@@ -237,6 +248,37 @@ export class WeChatAcpClient implements acp.Client {
       this.lastTypingAt = 0;
       return text;
     });
+  }
+
+  /**
+   * Compatibility fallback for agents that emit tool-result images only in
+   * `rawOutput` instead of ACP image content blocks. GitHub Copilot CLI puts
+   * them in `rawOutput.binaryResultsForLlm[]` as `{type: "image", data,
+   * mimeType}` and leaves `update.content` unset (issue 55). The spec types
+   * `rawOutput` as `unknown`, so every field is validated before use and
+   * anything malformed is ignored.
+   */
+  private async maybeSendRawOutputImages(rawOutput: unknown): Promise<void> {
+    if (typeof rawOutput !== "object" || rawOutput === null) {
+      return;
+    }
+    const bin = (rawOutput as { binaryResultsForLlm?: unknown }).binaryResultsForLlm;
+    if (!Array.isArray(bin)) {
+      return;
+    }
+    for (const entry of bin) {
+      if (typeof entry !== "object" || entry === null) {
+        continue;
+      }
+      const { type, data, mimeType } = entry as {
+        type?: unknown;
+        data?: unknown;
+        mimeType?: unknown;
+      };
+      if (type === "image" && typeof data === "string" && data && typeof mimeType === "string") {
+        await this.maybeSendImage({ data, mimeType });
+      }
+    }
   }
 
   /**
