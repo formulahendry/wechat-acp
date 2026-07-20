@@ -291,6 +291,17 @@ test("rawOutput mimeType with surrounding whitespace is normalized and delivered
   assert.equal(images[0].mimeType, "image/png", "delivered MIME type must be trimmed");
 });
 
+test("content-block mimeType with surrounding whitespace is normalized and delivered", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallImage(client, { data: PNG_BASE64, mimeType: " image/PNG " });
+
+  assert.equal(images.length, 1);
+  assert.equal(images[0].mimeType, "image/PNG", "delivered MIME type must be trimmed");
+});
+
 test("rawOutput fallback is skipped when a standard image content block is present", async () => {
   const images: AgentImage[] = [];
   const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });

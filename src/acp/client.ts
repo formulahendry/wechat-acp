@@ -286,12 +286,17 @@ export class WeChatAcpClient implements acp.Client {
         data?: unknown;
         mimeType?: unknown;
       };
-      // Normalize once so validation, delivery, and the [tool] image note
-      // all agree on what counts as a usable MIME type.
-      const mime = typeof mimeType === "string" ? mimeType.trim() : "";
-      if (type === "image" && typeof data === "string" && data && mime) {
+      // maybeSendImage normalizes the MIME type; here just require it to be
+      // non-blank so blank entries are not counted or logged as images.
+      if (
+        type === "image" &&
+        typeof data === "string" &&
+        data &&
+        typeof mimeType === "string" &&
+        mimeType.trim()
+      ) {
         images++;
-        await this.maybeSendImage({ data, mimeType: mime });
+        await this.maybeSendImage({ data, mimeType });
       }
     }
     return images;
@@ -308,6 +313,9 @@ export class WeChatAcpClient implements acp.Client {
    * loses content.
    */
   private async maybeSendImage(image: { data: string; mimeType: string }): Promise<void> {
+    // Trim once here so every image path (content block, message chunk,
+    // rawOutput fallback) validates and delivers the same normalized value.
+    const mimeType = image.mimeType.trim();
     if (this.opts.showImages === false) {
       this.opts.log(`[image] skipped (showImages=false, ${image.mimeType})`);
       return;
@@ -316,7 +324,7 @@ export class WeChatAcpClient implements acp.Client {
       this.opts.log(`[image] skipped (no image sink configured, ${image.mimeType})`);
       return;
     }
-    const mime = image.mimeType.toLowerCase();
+    const mime = mimeType.toLowerCase();
     if (!SUPPORTED_IMAGE_MIME_TYPES.has(mime)) {
       this.opts.log(`[image] skipped unsupported type: ${image.mimeType}`);
       return;
@@ -342,8 +350,8 @@ export class WeChatAcpClient implements acp.Client {
       // Single attempt here: the bridge-side sink owns retries (with a stable
       // client_id for gateway de-duplication), so retrying again at this layer
       // would multiply CDN uploads.
-      await this.opts.onImageFlush(image);
-      this.opts.log(`[image] sent (${image.mimeType}, ~${approxBytes} bytes)`);
+      await this.opts.onImageFlush({ data: image.data, mimeType });
+      this.opts.log(`[image] sent (${mimeType}, ~${approxBytes} bytes)`);
       this.producedMessageThisTurn = true;
     } catch (err) {
       this.opts.log(`[image] delivery failed: ${String(err)}`);
