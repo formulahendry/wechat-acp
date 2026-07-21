@@ -695,6 +695,37 @@ test("oversized resource with long name and MIME still fits one segment", async 
   assert.ok(labels[2].length <= 120, `mime label capped including ellipsis (got ${labels[2].length})`);
 });
 
+test("buffered narrative is flushed first when it would push the resource block past one segment", async () => {
+  const messages: string[] = [];
+  const client = makeClient({ onMessageFlush: async (t) => { messages.push(t); } });
+  client.newTurn();
+
+  const narrative = "line\n".repeat(780); // ~3900 chars buffered ahead of the resource
+  await emitMessageChunk(client, narrative);
+  await emitToolCallResource(client, { uri: "file:///notes.txt", text: "note ".repeat(100) });
+
+  assert.equal(messages.length, 1, "narrative must flush before the block is appended");
+  assert.equal(messages[0], narrative);
+  const text = await client.flush();
+  assert.match(text, /^\n📎 notes\.txt\n/, "block starts its own segment");
+  assert.equal(splitText(text, 4000).length, 1, "block is never split across messages");
+});
+
+test("small narrative and resource block share one segment without an early flush", async () => {
+  const messages: string[] = [];
+  const client = makeClient({ onMessageFlush: async (t) => { messages.push(t); } });
+  client.newTurn();
+
+  await emitMessageChunk(client, "before\n");
+  await emitToolCallResource(client, { uri: "file:///small.txt", text: "tiny" });
+
+  assert.equal(messages.length, 0, "no premature flush when everything fits one segment");
+  const text = await client.flush();
+  assert.match(text, /^before\n/);
+  assert.match(text, /📎 small\.txt\n/);
+  assert.equal(splitText(text, 4000).length, 1);
+});
+
 test("text resource containing triple backticks gets a longer fence", async () => {
   const client = makeClient({});
 

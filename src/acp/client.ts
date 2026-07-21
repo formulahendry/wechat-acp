@@ -8,6 +8,7 @@
 
 import fs from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
+import { TEXT_CHUNK_LIMIT } from "../weixin/send.js";
 
 /** An image content block produced by the agent, ready for outbound delivery. */
 export interface AgentImage {
@@ -30,13 +31,14 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /**
- * Budget for a rendered text-resource block: one WeChat segment
- * (TEXT_CHUNK_LIMIT in bridge.ts). The whole block (header, fences,
- * language hint, body, truncation tail) must fit, so `splitText()` never
- * has to split mid-fence; the body budget is derived from this after
- * subtracting the rendered overhead.
+ * Budget for a rendered text-resource block: one WeChat segment, the same
+ * {@link TEXT_CHUNK_LIMIT} that `deliverReply()` in bridge.ts segments
+ * against. The whole block (header, fences, language hint, body,
+ * truncation tail) must fit, so `splitText()` never has to split
+ * mid-fence; the body budget is derived from this after subtracting the
+ * rendered overhead.
  */
-const MAX_RESOURCE_BLOCK_CHARS = 4000;
+const MAX_RESOURCE_BLOCK_CHARS = TEXT_CHUNK_LIMIT;
 
 /** Fence language hints by MIME type; extensions fill the gaps. */
 const RESOURCE_MIME_LANGUAGES: Readonly<Record<string, string>> = {
@@ -735,7 +737,18 @@ export class WeChatAcpClient implements acp.Client {
         opts.log(`[resource] skipped empty text resource: ${name}`);
         return false;
       }
-      turn.chunks.push(renderTextResource(name, resource.mimeType, resource.text));
+      const rendered = renderTextResource(name, resource.mimeType, resource.text);
+      // The block itself fits one segment by construction, but narrative
+      // already buffered ahead of it could push the combined text past the
+      // segment limit and make splitText() cut inside the fence. Flush the
+      // buffer first so the block starts a fresh segment. If the flush
+      // fails it re-buffers (content preservation over the no-split
+      // guarantee in that degraded path), matching image/audio behavior.
+      const buffered = turn.chunks.reduce((sum, c) => sum + c.length, 0);
+      if (buffered > 0 && buffered + rendered.length > TEXT_CHUNK_LIMIT) {
+        await this.maybeFlushMessage(turn);
+      }
+      turn.chunks.push(rendered);
       turn.producedMessage = true;
       opts.log(`[resource] rendered text resource ${name} (${resource.text.length} chars)`);
       return false;
