@@ -138,6 +138,14 @@ export interface WeChatAcpConfig {
      * `--hide-audio`) to drop them.
      */
     showAudio?: boolean;
+    /**
+     * Render agent-produced ACP embedded `resource` content blocks in
+     * WeChat: text resources inline as fenced code blocks, image blobs
+     * through the image pipeline, other blobs as a one-line placeholder.
+     * Defaults to `true`; set to `false` (or pass `--hide-resources`)
+     * to drop them.
+     */
+    showResources?: boolean;
   };
   agents: Record<string, AgentPreset>;
   session: {
@@ -210,6 +218,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       showDiffs: false,
       showImages: true,
       showAudio: true,
+      showResources: true,
     },
     agents: { ...BUILT_IN_AGENTS },
     session: {

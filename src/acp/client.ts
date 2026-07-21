@@ -8,6 +8,7 @@
 
 import fs from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
+import { TEXT_CHUNK_LIMIT } from "../weixin/send.js";
 
 /** An image content block produced by the agent, ready for outbound delivery. */
 export interface AgentImage {
@@ -28,6 +29,189 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
 
 /** Sanity cap on decoded image size (10 MiB). */
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Budget for a rendered text-resource block: one WeChat segment, the same
+ * {@link TEXT_CHUNK_LIMIT} that `deliverReply()` in bridge.ts segments
+ * against. The whole block (header, fences, language hint, body,
+ * truncation tail) must fit, so `splitText()` never has to split
+ * mid-fence; the body budget is derived from this after subtracting the
+ * rendered overhead.
+ */
+const MAX_RESOURCE_BLOCK_CHARS = TEXT_CHUNK_LIMIT;
+
+/** Fence language hints by MIME type; extensions fill the gaps. */
+const RESOURCE_MIME_LANGUAGES: Readonly<Record<string, string>> = {
+  "application/json": "json",
+  "application/javascript": "javascript",
+  "text/javascript": "javascript",
+  "text/x-python": "python",
+  "text/html": "html",
+  "text/css": "css",
+  "text/xml": "xml",
+  "application/xml": "xml",
+  "text/markdown": "markdown",
+  "text/yaml": "yaml",
+  "application/x-yaml": "yaml",
+  "application/x-sh": "bash",
+  "text/x-shellscript": "bash",
+};
+
+/** Fence language hints by file extension of the resource name. */
+const RESOURCE_EXT_LANGUAGES: Readonly<Record<string, string>> = {
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  jsx: "jsx",
+  ts: "typescript",
+  tsx: "tsx",
+  py: "python",
+  json: "json",
+  html: "html",
+  htm: "html",
+  css: "css",
+  xml: "xml",
+  yml: "yaml",
+  yaml: "yaml",
+  md: "markdown",
+  sh: "bash",
+  bash: "bash",
+  ps1: "powershell",
+  go: "go",
+  rs: "rust",
+  java: "java",
+  kt: "kotlin",
+  c: "c",
+  h: "c",
+  cpp: "cpp",
+  cs: "csharp",
+  rb: "ruby",
+  php: "php",
+  sql: "sql",
+  diff: "diff",
+  patch: "diff",
+  toml: "toml",
+  ini: "ini",
+};
+
+/** Cap on sanitized inline labels so a crafted URI cannot flood a header line. */
+const MAX_LABEL_CHARS = 120;
+
+/**
+ * Collapse agent-controlled label text (resource names, MIME notes) to one
+ * safe line before it is interpolated into `📎` headers, placeholders, or
+ * logs. URIs percent-decode and MIME types arrive raw off the wire, so
+ * either can carry newlines or control characters that would break the
+ * one-line format and inject extra lines into the chat transcript.
+ */
+function sanitizeInlineLabel(value: string): string {
+  const collapsed = value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  // Cap includes the ellipsis so the documented bound holds exactly.
+  return collapsed.length > MAX_LABEL_CHARS
+    ? `${collapsed.slice(0, MAX_LABEL_CHARS - 3)}...`
+    : collapsed;
+}
+
+/**
+ * Human-readable name for a resource: the last path segment of its URI,
+ * percent-decoded and sanitized to a single line. Falls back to the full
+ * URI when there is no useful path segment (e.g. `untitled:Untitled-1`,
+ * an authority with no path like `https://example.com`, or an empty URI),
+ * and to `resource` when nothing printable survives sanitization.
+ */
+function resourceDisplayName(uri: string): string {
+  const trimmed = uri.trim();
+  if (!trimmed) return "resource";
+  const stripped = trimmed.replace(/[?#].*$/, "");
+  const schemeMatch = stripped.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/);
+  const rest = schemeMatch ? stripped.slice(schemeMatch[0].length) : stripped;
+  let path = rest;
+  if (rest.startsWith("//")) {
+    // Hierarchical URI: drop the authority so a bare host is never
+    // mistaken for a path segment (https://example.com has no path).
+    const slash = rest.indexOf("/", 2);
+    path = slash >= 0 ? rest.slice(slash) : "";
+  } else if (schemeMatch && !rest.includes("/")) {
+    // Opaque URI (untitled:Untitled-1): no path to extract.
+    path = "";
+  }
+  const segments = path.split("/").filter((s) => s.length > 0);
+  const last = segments[segments.length - 1] ?? "";
+  let name: string;
+  if (!last) {
+    name = trimmed;
+  } else {
+    try {
+      name = decodeURIComponent(last);
+    } catch {
+      name = last;
+    }
+  }
+  return sanitizeInlineLabel(name) || "resource";
+}
+
+function resourceFenceLanguage(name: string, mimeType?: string | null): string {
+  // Strip MIME parameters (application/json; charset=utf-8) before the
+  // lookup, matching the base-type normalization in the blob path.
+  const mime = mimeType?.split(";")[0].trim().toLowerCase() ?? "";
+  // Object.hasOwn, not `in`: prototype-chain keys like "toString" must not
+  // resolve to a language.
+  if (mime && Object.hasOwn(RESOURCE_MIME_LANGUAGES, mime)) {
+    return RESOURCE_MIME_LANGUAGES[mime];
+  }
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+  if (ext && Object.hasOwn(RESOURCE_EXT_LANGUAGES, ext)) {
+    return RESOURCE_EXT_LANGUAGES[ext];
+  }
+  return "";
+}
+
+/**
+ * Cap on the rendered fence length. Inner backtick runs of this length or
+ * longer are squeezed to one tick shorter so the fence still contains the
+ * body; without the cap, an adversarial run of backticks would force a
+ * fence thousands of characters long, blowing the one-segment bound and
+ * risking a mid-fence split downstream.
+ */
+const MAX_FENCE_TICKS = 8;
+
+/**
+ * Render a text resource as a fenced code block with a one-line header
+ * naming it. The fence is longer than any backtick run inside the body so
+ * the content cannot break out, capped at {@link MAX_FENCE_TICKS} (longer
+ * inner runs are squeezed to fit). The whole rendered block is budgeted
+ * against {@link MAX_RESOURCE_BLOCK_CHARS}: the body budget subtracts the
+ * header, fences, and language hint, and oversized bodies are truncated
+ * with an explicit tail line inside the fence, so the block always fits a
+ * single WeChat segment and is never split mid-fence downstream.
+ */
+function renderTextResource(name: string, mimeType: string | null | undefined, text: string): string {
+  const lang = resourceFenceLanguage(name, mimeType);
+  const mime = mimeType ? sanitizeInlineLabel(mimeType) : "";
+  const mimeNote = mime ? ` (${mime})` : "";
+  const header = `\n📎 ${name}${mimeNote}\n`;
+  // Worst-case fence length keeps the budget single-pass: the fence is
+  // computed from the final body below but never exceeds MAX_FENCE_TICKS.
+  const fixedOverhead = header.length + MAX_FENCE_TICKS + lang.length + 1 + 1 + MAX_FENCE_TICKS + 1;
+  let body = text
+    .replace(/(\r\n|\n|\r)$/, "")
+    .replace(new RegExp("`{" + MAX_FENCE_TICKS + ",}", "g"), "`".repeat(MAX_FENCE_TICKS - 1));
+  const budget = MAX_RESOURCE_BLOCK_CHARS - fixedOverhead;
+  if (body.length > budget) {
+    // Reserve tail space using the full body length's digit count; the
+    // actual dropped count is never longer, so the block stays in budget.
+    const tailReserve = `\n... [truncated, ${body.length} more chars]`.length;
+    const keep = Math.max(0, budget - tailReserve);
+    body = `${body.slice(0, keep)}\n... [truncated, ${body.length - keep} more chars]`;
+  }
+  const longestRun = body.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
+  const fence = "`".repeat(Math.max(3, Math.min(longestRun + 1, MAX_FENCE_TICKS)));
+  return `${header}${fence}${lang}\n${body}\n${fence}\n`;
+}
 
 /** An audio content block produced by the agent, ready for outbound delivery. */
 export interface AgentAudio {
@@ -74,6 +258,7 @@ export interface WeChatAcpClientOpts {
   showDiffs?: boolean;
   showImages?: boolean;
   showAudio?: boolean;
+  showResources?: boolean;
 }
 
 /**
@@ -229,6 +414,8 @@ export class WeChatAcpClient implements acp.Client {
           await this.maybeSendImage(update.content, turn);
         } else if (update.content.type === "audio") {
           await this.maybeSendAudio(update.content, turn);
+        } else if (update.content.type === "resource") {
+          await this.maybeRenderResource(update.content.resource, turn);
         }
         // Throttle typing indicators
         await this.maybeSendTyping(turn);
@@ -255,6 +442,7 @@ export class WeChatAcpClient implements acp.Client {
 
       case "tool_call_update": {
         let imageContentBlocks = 0;
+        let resourceImages = 0;
         if (update.status === "completed" && update.content) {
           for (const c of update.content) {
             if (c.type === "diff") {
@@ -277,24 +465,29 @@ export class WeChatAcpClient implements acp.Client {
               await this.maybeSendImage(c.content, turn);
             } else if (c.type === "content" && c.content.type === "audio") {
               await this.maybeSendAudio(c.content, turn);
+            } else if (c.type === "content" && c.content.type === "resource") {
+              if (await this.maybeRenderResource(c.content.resource, turn)) {
+                resourceImages++;
+              }
             }
           }
         }
         // Copilot CLI compatibility: the CLI emits tool-result images only in
         // rawOutput.binaryResultsForLlm and never as ACP image content blocks
         // (formulahendry/wechat-acp issue 55). Fall back to rawOutput only
-        // when the standard path produced no image, so an agent that one day
-        // populates both fields never delivers the same image twice.
+        // when the standard path (image content blocks or image resources)
+        // produced no image, so an agent that one day populates both fields
+        // never delivers the same image twice.
         let rawOutputImages = 0;
-        if (update.status === "completed" && imageContentBlocks === 0) {
+        if (update.status === "completed" && imageContentBlocks === 0 && resourceImages === 0) {
           rawOutputImages = await this.maybeSendRawOutputImages(update.rawOutput, turn);
         }
         if (update.status) {
           // Surface where images came from so field issues like issue 55
           // (image present but in a non-standard location) show up in logs.
           const imageNote =
-            imageContentBlocks > 0
-              ? ` [images: ${imageContentBlocks} content block]`
+            imageContentBlocks + resourceImages > 0
+              ? ` [images: ${imageContentBlocks + resourceImages} content block]`
               : rawOutputImages > 0
                 ? ` [images: ${rawOutputImages} rawOutput fallback]`
                 : "";
@@ -514,6 +707,83 @@ export class WeChatAcpClient implements acp.Client {
       turn.chunks.push("\n⚠️ [audio could not be delivered]\n");
       turn.producedMessage = true;
     }
+  }
+
+  /**
+   * Render an agent-produced embedded resource content block (issue 59).
+   * Text resources are appended to the text stream as a fenced code block
+   * with a naming header, so they flush in order with the surrounding
+   * narrative through the existing buffer machinery. Blob resources with
+   * an image MIME type reuse the image delivery pipeline (allow-list,
+   * size cap, ordering, placeholders); other blobs surface as a one-line
+   * placeholder instead of being dropped silently. Returns true when the
+   * resource was routed into the image pipeline, so the caller can count
+   * it against the rawOutput compatibility fallback and avoid delivering
+   * the same image twice.
+   */
+  private async maybeRenderResource(
+    resource: acp.EmbeddedResource["resource"],
+    turn: TurnState,
+  ): Promise<boolean> {
+    const opts = turn.opts;
+    const name = resourceDisplayName(resource.uri);
+    if (opts.showResources === false) {
+      opts.log(`[resource] skipped (showResources=false, ${name})`);
+      return false;
+    }
+
+    if ("text" in resource) {
+      if (!resource.text.trim()) {
+        opts.log(`[resource] skipped empty text resource: ${name}`);
+        return false;
+      }
+      const rendered = renderTextResource(name, resource.mimeType, resource.text);
+      // The block itself fits one segment by construction, but narrative
+      // already buffered ahead of it could push the combined text past the
+      // segment limit and make splitText() cut inside the fence. Flush the
+      // buffer first so the block starts a fresh segment. If the flush
+      // fails it re-buffers (content preservation over the no-split
+      // guarantee in that degraded path), matching image/audio behavior.
+      const buffered = turn.chunks.reduce((sum, c) => sum + c.length, 0);
+      if (buffered > 0 && buffered + rendered.length > TEXT_CHUNK_LIMIT) {
+        await this.maybeFlushMessage(turn);
+      }
+      turn.chunks.push(rendered);
+      turn.producedMessage = true;
+      opts.log(`[resource] rendered text resource ${name} (${resource.text.length} chars)`);
+      return false;
+    }
+
+    // Sanitized once here: the label feeds the placeholder, the logs, and
+    // the value forwarded to the image pipeline.
+    const mime = sanitizeInlineLabel(resource.mimeType ?? "");
+    // Route into the image pipeline only when it can actually deliver:
+    // exact allow-listed base type (parameters stripped), images enabled,
+    // and a sink configured. Every miss path in maybeSendImage other than
+    // the oversized/failure placeholders is log-and-skip, which is fine
+    // for image content blocks but would silently drop a resource (and a
+    // resource-only turn would then trigger the empty-turn notice), so
+    // anything not deliverable falls through to the visible placeholder.
+    const baseMime = mime.split(";")[0].trim().toLowerCase();
+    if (
+      SUPPORTED_IMAGE_MIME_TYPES.has(baseMime) &&
+      opts.showImages !== false &&
+      opts.onImageFlush
+    ) {
+      // Route through the image pipeline so an image handed back as an
+      // embedded resource behaves exactly like an image content block.
+      await this.maybeSendImage({ data: resource.blob, mimeType: baseMime }, turn);
+      return true;
+    }
+
+    // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes.
+    const approxBytes = Math.ceil(resource.blob.length / 4) * 3;
+    turn.chunks.push(
+      `\n📎 [resource: ${name} (${mime || "unknown type"}, ~${approxBytes} bytes) - binary content not rendered]\n`,
+    );
+    turn.producedMessage = true;
+    opts.log(`[resource] blob resource ${name} not rendered (${mime || "unknown type"}, ~${approxBytes} bytes)`);
+    return false;
   }
 
   private async maybeFlushThoughts(turn: TurnState): Promise<void> {

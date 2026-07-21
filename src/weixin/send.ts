@@ -356,6 +356,14 @@ export async function sendFileMessage(
 }
 
 /**
+ * Maximum characters per outbound WeChat text message. Text longer than
+ * this must be segmented with {@link splitText}; renderers that need a
+ * message to arrive unsplit (e.g. fenced resource blocks) budget against
+ * this same value.
+ */
+export const TEXT_CHUNK_LIMIT = 4000;
+
+/**
  * Split text into segments of max length, respecting line breaks where possible.
  */
 export function splitText(text: string, maxLen: number): string[] {

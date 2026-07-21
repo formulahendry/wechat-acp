@@ -9,7 +9,7 @@ import type * as acp from "@agentclientprotocol/sdk";
 import crypto from "node:crypto";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
-import { sendTextMessage, uploadImageMedia, sendImageItem, uploadFileMedia, sendFileItem, splitText } from "./weixin/send.js";
+import { sendTextMessage, uploadImageMedia, sendImageItem, uploadFileMedia, sendFileItem, splitText, TEXT_CHUNK_LIMIT } from "./weixin/send.js";
 import type { UploadedImageMedia, UploadedFileMedia } from "./weixin/send.js";
 import { sendTyping, getConfig } from "./weixin/api.js";
 import { TypingStatus, MessageType } from "./weixin/types.js";
@@ -29,7 +29,6 @@ const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
 const ACP_CANCEL_COMMAND = BRIDGE_COMMANDS.acpCancel;
 const BUFFER_START_COMMAND = BRIDGE_COMMANDS.promptStart;
 const BUFFER_DONE_COMMAND = BRIDGE_COMMANDS.promptDone;
-const TEXT_CHUNK_LIMIT = 4000;
 const BUFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const BUFFER_MAX_BLOCKS = 50;
 const SEGMENT_SEND_MAX_ATTEMPTS = 3;
@@ -137,6 +136,7 @@ export class WeChatAcpBridge {
       showDiffs: this.config.agent.showDiffs ?? false,
       showImages: this.config.agent.showImages ?? true,
       showAudio: this.config.agent.showAudio ?? true,
+      showResources: this.config.agent.showResources ?? true,
       log: this.log,
       onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
       onReplyImage: (userId, contextToken, image) => this.sendImageReply(userId, contextToken, image),

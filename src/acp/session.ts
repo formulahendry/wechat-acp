@@ -65,6 +65,7 @@ export interface SessionManagerOpts {
   showDiffs?: boolean;
   showImages?: boolean;
   showAudio?: boolean;
+  showResources?: boolean;
   log: (msg: string) => void;
   onReply: (userId: string, contextToken: string, text: string) => Promise<void>;
   onReplyImage?: (userId: string, contextToken: string, image: AgentImage) => Promise<void>;
@@ -246,6 +247,7 @@ export class SessionManager {
       showDiffs: this.opts.showDiffs ?? false,
       showImages: this.opts.showImages ?? true,
       showAudio: this.opts.showAudio ?? true,
+      showResources: this.opts.showResources ?? true,
     });
 
     const agentInfo = await spawnAgent({
