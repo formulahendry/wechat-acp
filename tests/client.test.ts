@@ -10,6 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { WeChatAcpClient, type AgentImage } from "../src/acp/client.js";
+import { splitText } from "../src/weixin/send.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -640,9 +641,25 @@ test("oversized text resource truncates with an explicit tail inside the fence",
   await emitToolCallResource(client, { uri: "file:///big.txt", text: body });
 
   const text = await client.flush();
-  assert.match(text, /\.\.\. \[truncated, 1234 more chars\]/);
-  const rendered = text.slice(text.indexOf("📎"));
-  assert.ok(rendered.length < 4600, "rendered block stays near one WeChat segment");
+  assert.match(text, /\.\.\. \[truncated, \d+ more chars\]/);
+  assert.ok(text.length <= 4000, `rendered block fits one WeChat segment (got ${text.length})`);
+  assert.equal(splitText(text, 4000).length, 1, "block is never split across messages");
+  assert.ok(text.trimEnd().endsWith("```"), "closing fence survives truncation");
+});
+
+test("oversized resource with long name and MIME still fits one segment", async () => {
+  const client = makeClient({});
+
+  const name = "a".repeat(300) + ".txt";
+  await emitToolCallResource(client, {
+    uri: `file:///${name}`,
+    mimeType: "text/plain; " + "p".repeat(200),
+    text: "y".repeat(10_000),
+  });
+
+  const text = await client.flush();
+  assert.ok(text.length <= 4000, `worst-case overhead stays in budget (got ${text.length})`);
+  assert.equal(splitText(text, 4000).length, 1, "block is never split across messages");
 });
 
 test("text resource containing triple backticks gets a longer fence", async () => {
@@ -676,6 +693,28 @@ test("image blob resource is delivered through the image pipeline exactly once",
   assert.equal(images[0].mimeType, "image/png");
   assert.equal(client.hasProducedMessage, true);
   assert.equal(await client.flush(), "", "no text residue for a delivered image blob");
+});
+
+test("resource image suppresses the rawOutput fallback so the image is not delivered twice", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(
+    client,
+    { binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }] },
+    [
+      {
+        type: "content",
+        content: {
+          type: "resource",
+          resource: { uri: "file:///chart.png", mimeType: "image/png", blob: PNG_BASE64 },
+        },
+      },
+    ],
+  );
+
+  assert.equal(images.length, 1, "image must be delivered exactly once, not per source");
 });
 
 test("non-image blob resource surfaces as a one-line placeholder", async () => {

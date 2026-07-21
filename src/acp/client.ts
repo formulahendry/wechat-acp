@@ -30,11 +30,13 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 /**
- * Cap on inline text-resource rendering: one WeChat segment
- * (TEXT_CHUNK_LIMIT in bridge.ts). Resources are context payloads; the cap
- * keeps a single resource from flooding a turn with dozens of segments.
+ * Budget for a rendered text-resource block: one WeChat segment
+ * (TEXT_CHUNK_LIMIT in bridge.ts). The whole block (header, fences,
+ * language hint, body, truncation tail) must fit, so `splitText()` never
+ * has to split mid-fence; the body budget is derived from this after
+ * subtracting the rendered overhead.
  */
-const MAX_RESOURCE_TEXT_CHARS = 4000;
+const MAX_RESOURCE_BLOCK_CHARS = 4000;
 
 /** Fence language hints by MIME type; extensions fill the gaps. */
 const RESOURCE_MIME_LANGUAGES: Readonly<Record<string, string>> = {
@@ -176,25 +178,34 @@ const MAX_FENCE_TICKS = 8;
  * Render a text resource as a fenced code block with a one-line header
  * naming it. The fence is longer than any backtick run inside the body so
  * the content cannot break out, capped at {@link MAX_FENCE_TICKS} (longer
- * inner runs are squeezed to fit); bodies above
- * {@link MAX_RESOURCE_TEXT_CHARS} are truncated with an explicit tail line
- * inside the fence.
+ * inner runs are squeezed to fit). The whole rendered block is budgeted
+ * against {@link MAX_RESOURCE_BLOCK_CHARS}: the body budget subtracts the
+ * header, fences, and language hint, and oversized bodies are truncated
+ * with an explicit tail line inside the fence, so the block always fits a
+ * single WeChat segment and is never split mid-fence downstream.
  */
 function renderTextResource(name: string, mimeType: string | null | undefined, text: string): string {
-  let body = text;
-  if (text.length > MAX_RESOURCE_TEXT_CHARS) {
-    body =
-      text.slice(0, MAX_RESOURCE_TEXT_CHARS) +
-      `\n... [truncated, ${text.length - MAX_RESOURCE_TEXT_CHARS} more chars]`;
-  }
-  body = body.replace(/(\r\n|\n|\r)$/, "");
-  body = body.replace(new RegExp("`{" + MAX_FENCE_TICKS + ",}", "g"), "`".repeat(MAX_FENCE_TICKS - 1));
-  const longestRun = body.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
-  const fence = "`".repeat(Math.max(3, Math.min(longestRun + 1, MAX_FENCE_TICKS)));
   const lang = resourceFenceLanguage(name, mimeType);
   const mime = mimeType ? sanitizeInlineLabel(mimeType) : "";
   const mimeNote = mime ? ` (${mime})` : "";
-  return `\n📎 ${name}${mimeNote}\n${fence}${lang}\n${body}\n${fence}\n`;
+  const header = `\n📎 ${name}${mimeNote}\n`;
+  // Worst-case fence length keeps the budget single-pass: the fence is
+  // computed from the final body below but never exceeds MAX_FENCE_TICKS.
+  const fixedOverhead = header.length + MAX_FENCE_TICKS + lang.length + 1 + 1 + MAX_FENCE_TICKS + 1;
+  let body = text
+    .replace(/(\r\n|\n|\r)$/, "")
+    .replace(new RegExp("`{" + MAX_FENCE_TICKS + ",}", "g"), "`".repeat(MAX_FENCE_TICKS - 1));
+  const budget = MAX_RESOURCE_BLOCK_CHARS - fixedOverhead;
+  if (body.length > budget) {
+    // Reserve tail space using the full body length's digit count; the
+    // actual dropped count is never longer, so the block stays in budget.
+    const tailReserve = `\n... [truncated, ${body.length} more chars]`.length;
+    const keep = Math.max(0, budget - tailReserve);
+    body = `${body.slice(0, keep)}\n... [truncated, ${body.length - keep} more chars]`;
+  }
+  const longestRun = body.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
+  const fence = "`".repeat(Math.max(3, Math.min(longestRun + 1, MAX_FENCE_TICKS)));
+  return `${header}${fence}${lang}\n${body}\n${fence}\n`;
 }
 
 export interface WeChatAcpClientOpts {
@@ -387,6 +398,7 @@ export class WeChatAcpClient implements acp.Client {
 
       case "tool_call_update": {
         let imageContentBlocks = 0;
+        let resourceImages = 0;
         if (update.status === "completed" && update.content) {
           for (const c of update.content) {
             if (c.type === "diff") {
@@ -408,25 +420,28 @@ export class WeChatAcpClient implements acp.Client {
               imageContentBlocks++;
               await this.maybeSendImage(c.content, turn);
             } else if (c.type === "content" && c.content.type === "resource") {
-              await this.maybeRenderResource(c.content.resource, turn);
+              if (await this.maybeRenderResource(c.content.resource, turn)) {
+                resourceImages++;
+              }
             }
           }
         }
         // Copilot CLI compatibility: the CLI emits tool-result images only in
         // rawOutput.binaryResultsForLlm and never as ACP image content blocks
         // (formulahendry/wechat-acp issue 55). Fall back to rawOutput only
-        // when the standard path produced no image, so an agent that one day
-        // populates both fields never delivers the same image twice.
+        // when the standard path (image content blocks or image resources)
+        // produced no image, so an agent that one day populates both fields
+        // never delivers the same image twice.
         let rawOutputImages = 0;
-        if (update.status === "completed" && imageContentBlocks === 0) {
+        if (update.status === "completed" && imageContentBlocks === 0 && resourceImages === 0) {
           rawOutputImages = await this.maybeSendRawOutputImages(update.rawOutput, turn);
         }
         if (update.status) {
           // Surface where images came from so field issues like issue 55
           // (image present but in a non-standard location) show up in logs.
           const imageNote =
-            imageContentBlocks > 0
-              ? ` [images: ${imageContentBlocks} content block]`
+            imageContentBlocks + resourceImages > 0
+              ? ` [images: ${imageContentBlocks + resourceImages} content block]`
               : rawOutputImages > 0
                 ? ` [images: ${rawOutputImages} rawOutput fallback]`
                 : "";
@@ -603,28 +618,31 @@ export class WeChatAcpClient implements acp.Client {
    * narrative through the existing buffer machinery. Blob resources with
    * an image MIME type reuse the image delivery pipeline (allow-list,
    * size cap, ordering, placeholders); other blobs surface as a one-line
-   * placeholder instead of being dropped silently.
+   * placeholder instead of being dropped silently. Returns true when the
+   * resource was routed into the image pipeline, so the caller can count
+   * it against the rawOutput compatibility fallback and avoid delivering
+   * the same image twice.
    */
   private async maybeRenderResource(
     resource: acp.EmbeddedResource["resource"],
     turn: TurnState,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const opts = turn.opts;
     const name = resourceDisplayName(resource.uri);
     if (opts.showResources === false) {
       opts.log(`[resource] skipped (showResources=false, ${name})`);
-      return;
+      return false;
     }
 
     if ("text" in resource) {
       if (!resource.text.trim()) {
         opts.log(`[resource] skipped empty text resource: ${name}`);
-        return;
+        return false;
       }
       turn.chunks.push(renderTextResource(name, resource.mimeType, resource.text));
       turn.producedMessage = true;
       opts.log(`[resource] rendered text resource ${name} (${resource.text.length} chars)`);
-      return;
+      return false;
     }
 
     // Sanitized once here: the label feeds the placeholder, the logs, and
@@ -646,7 +664,7 @@ export class WeChatAcpClient implements acp.Client {
       // Route through the image pipeline so an image handed back as an
       // embedded resource behaves exactly like an image content block.
       await this.maybeSendImage({ data: resource.blob, mimeType: baseMime }, turn);
-      return;
+      return true;
     }
 
     // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes.
@@ -656,6 +674,7 @@ export class WeChatAcpClient implements acp.Client {
     );
     turn.producedMessage = true;
     opts.log(`[resource] blob resource ${name} not rendered (${mime || "unknown type"}, ~${approxBytes} bytes)`);
+    return false;
   }
 
   private async maybeFlushThoughts(turn: TurnState): Promise<void> {
