@@ -37,7 +37,8 @@ export type EventName =
   | "session.created"
   | "prompt.completed"
   | "reply.sent"
-  | "reply.image.sent";
+  | "reply.image.sent"
+  | "reply.audio.sent";
 
 type PropValue = string | number | boolean;
 

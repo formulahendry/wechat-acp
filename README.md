@@ -105,6 +105,7 @@ Options:
 - `--hide-thoughts`: do not forward agent thinking to WeChat (default: forwarded)
 - `--show-diffs`: forward ACP file diffs to WeChat (default: hidden)
 - `--hide-images`: do not forward agent image output to WeChat (default: forwarded)
+- `--hide-audio`: do not forward agent audio output to WeChat (default: forwarded)
 - `inject --text <text>`: enqueue a local text message for the running daemon
 - `-V, --version`: print version and exit
 - `-h, --help`: show help
@@ -426,7 +427,7 @@ npm run dev
 WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 ```
 
-**What is collected** (15 event types only):
+**What is collected** (17 event types only):
 
 - `app.start` / `app.stop` — process lifecycle, agent preset name, daemon flag, uptime
 - `login.success` / `login.failure` / `token.reused` — WeChat login outcomes (no token, no QR URL)
@@ -441,8 +442,9 @@ WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 - `prompt.completed` — ACP turn finished; agent preset, stop reason, duration, reply length
 - `reply.sent` — reply pushed back to WeChat; segment count, total length
 - `reply.image.sent`: image reply pushed back to WeChat; byte size, MIME type, duration
+- `reply.audio.sent`: audio reply pushed back to WeChat as a file message; byte size, MIME type, duration
 
-Plus exception reports for `monitor`, `prompt`, `reply`, `reply.image`, `auth`, `agent_spawn`, `enqueue`, `buffer`, `command`, and `state` failures.
+Plus exception reports for `monitor`, `prompt`, `reply`, `reply.image`, `reply.audio`, `auth`, `agent_spawn`, `enqueue`, `buffer`, `command`, and `state` failures.
 
 **What is never collected**: message bodies, filenames, voice transcripts, image URLs, login tokens, QR codes, raw agent command strings, environment variables, working directory paths, raw WeChat user IDs.
 

@@ -47,17 +47,23 @@ export async function sendTextMessage(
 }
 
 /**
- * Image upload/send dependencies, injectable for tests.
+ * Media upload/send dependencies, injectable for tests.
  */
-export interface ImageSendDeps {
+export interface MediaSendDeps {
   getUploadUrlFn?: typeof getUploadUrl;
   uploadFn?: typeof uploadToCdn;
   sendFn?: typeof sendMessage;
 }
 
-export interface WeixinImageSendOpts extends WeixinSendOpts {
+/** @deprecated alias kept for source compatibility; use {@link MediaSendDeps}. */
+export type ImageSendDeps = MediaSendDeps;
+
+export interface WeixinMediaSendOpts extends WeixinSendOpts {
   cdnBaseUrl: string;
 }
+
+/** @deprecated alias kept for source compatibility; use {@link WeixinMediaSendOpts}. */
+export type WeixinImageSendOpts = WeixinMediaSendOpts;
 
 /**
  * CDN media descriptor for an uploaded image, ready to be attached to an
@@ -75,24 +81,49 @@ export interface UploadedImageMedia {
 }
 
 /**
- * Upload an image to the WeChat CDN: random 16-byte AES key + 32-hex-char
- * filekey, getuploadurl with media_type=IMAGE, plaintext md5/size, padded
- * ciphertext size, then AES-128-ECB encrypt + CDN POST. The download param
- * comes back via the x-encrypted-param response header.
+ * CDN media descriptor for an uploaded file, ready to be attached to a
+ * `file_item`. Same retry contract as {@link UploadedImageMedia}: reuse
+ * the descriptor (and the client_id) across send retries so every attempt
+ * is byte-identical.
+ */
+export interface UploadedFileMedia {
+  encrypt_query_param: string;
+  /** Base64 of the hex-encoded AES key, the convention parseAesKey() decodes. */
+  aes_key: string;
+  /** Plaintext size in bytes, reported as file_item.len. */
+  raw_size: number;
+}
+
+/** Internal result of the shared CDN upload handshake. */
+interface UploadedCdnMedia {
+  encrypt_query_param: string;
+  aes_key: string;
+  /** Plaintext size in bytes. */
+  raw_size: number;
+  /** Ciphertext size (PKCS7-padded). */
+  ciphertext_size: number;
+}
+
+/**
+ * Upload a media buffer to the WeChat CDN: random 16-byte AES key +
+ * 32-hex-char filekey, getuploadurl with the given media_type, plaintext
+ * md5/size, padded ciphertext size, then AES-128-ECB encrypt + CDN POST.
+ * The download param comes back via the x-encrypted-param response header.
  *
  * Protocol mirrors @tencent-weixin/openclaw-weixin.
  */
-export async function uploadImageMedia(
+async function uploadCdnMedia(
   to: string,
-  image: Buffer,
-  opts: WeixinImageSendOpts,
-  deps?: ImageSendDeps,
-): Promise<UploadedImageMedia> {
+  buffer: Buffer,
+  mediaType: number,
+  opts: WeixinMediaSendOpts,
+  deps?: MediaSendDeps,
+): Promise<UploadedCdnMedia> {
   const getUploadUrlFn = deps?.getUploadUrlFn ?? getUploadUrl;
   const uploadFn = deps?.uploadFn ?? uploadToCdn;
 
-  const rawsize = image.length;
-  const rawfilemd5 = crypto.createHash("md5").update(image).digest("hex");
+  const rawsize = buffer.length;
+  const rawfilemd5 = crypto.createHash("md5").update(buffer).digest("hex");
   const filesize = aesEcbPaddedSize(rawsize);
   const filekey = crypto.randomBytes(16).toString("hex");
   const aesKey = crypto.randomBytes(16);
@@ -102,7 +133,7 @@ export async function uploadImageMedia(
     token: opts.token,
     body: {
       filekey,
-      media_type: UploadMediaType.IMAGE,
+      media_type: mediaType,
       to_user_id: to,
       rawsize,
       rawfilemd5,
@@ -117,7 +148,7 @@ export async function uploadImageMedia(
   }
 
   const downloadParam = await uploadFn({
-    buffer: image,
+    buffer,
     uploadParam: uploadUrlResp.upload_param,
     uploadFullUrl: uploadUrlResp.upload_full_url,
     aesKey,
@@ -130,7 +161,26 @@ export async function uploadImageMedia(
     // aes_key is the base64 of the ASCII hex string, the same convention
     // parseAesKey() decodes on the inbound path.
     aes_key: Buffer.from(aesKey.toString("hex")).toString("base64"),
-    mid_size: filesize,
+    raw_size: rawsize,
+    ciphertext_size: filesize,
+  };
+}
+
+/**
+ * Upload an image to the WeChat CDN with media_type=IMAGE. See
+ * {@link uploadCdnMedia} for the handshake details.
+ */
+export async function uploadImageMedia(
+  to: string,
+  image: Buffer,
+  opts: WeixinMediaSendOpts,
+  deps?: MediaSendDeps,
+): Promise<UploadedImageMedia> {
+  const media = await uploadCdnMedia(to, image, UploadMediaType.IMAGE, opts, deps);
+  return {
+    encrypt_query_param: media.encrypt_query_param,
+    aes_key: media.aes_key,
+    mid_size: media.ciphertext_size,
   };
 }
 
@@ -205,6 +255,104 @@ export async function sendImageMessage(
   }
   const media = await uploadImageMedia(to, image, opts, deps);
   return sendImageItem(to, media, opts, clientId, deps?.sendFn);
+}
+
+/**
+ * Upload a generic file to the WeChat CDN with media_type=FILE. WeChat
+ * renders the resulting message as a tappable file card; for audio files
+ * the built-in preview opens a player.
+ */
+export async function uploadFileMedia(
+  to: string,
+  file: Buffer,
+  opts: WeixinMediaSendOpts,
+  deps?: MediaSendDeps,
+): Promise<UploadedFileMedia> {
+  const media = await uploadCdnMedia(to, file, UploadMediaType.FILE, opts, deps);
+  return {
+    encrypt_query_param: media.encrypt_query_param,
+    aes_key: media.aes_key,
+    raw_size: media.raw_size,
+  };
+}
+
+/**
+ * Send an already-uploaded file as a native file message. Retry-safe:
+ * with the same `media`, `fileName` and `clientId`, every attempt sends a
+ * byte-identical message, so the iLink gateway de-duplicates by client_id
+ * (same contract as {@link sendImageItem}).
+ *
+ * Returns the client_id used.
+ */
+export async function sendFileItem(
+  to: string,
+  media: UploadedFileMedia,
+  fileName: string,
+  opts: WeixinSendOpts,
+  clientId?: string,
+  sendFn: typeof sendMessage = sendMessage,
+): Promise<string> {
+  if (!opts.contextToken) {
+    throw new Error("contextToken is required to send a message");
+  }
+
+  const id = clientId ?? `wechat-acp-${crypto.randomUUID()}`;
+  await sendFn({
+    baseUrl: opts.baseUrl,
+    token: opts.token,
+    body: {
+      msg: {
+        from_user_id: "",
+        to_user_id: to,
+        client_id: id,
+        message_type: MessageType.BOT,
+        message_state: MessageState.FINISH,
+        context_token: opts.contextToken,
+        item_list: [
+          {
+            type: MessageItemType.FILE,
+            file_item: {
+              media: {
+                encrypt_query_param: media.encrypt_query_param,
+                aes_key: media.aes_key,
+                encrypt_type: 1,
+              },
+              file_name: fileName,
+              // Plaintext size as a decimal string, per the openclaw-weixin
+              // file_item convention (unlike image mid_size, which is the
+              // ciphertext size as a number).
+              len: String(media.raw_size),
+            },
+          },
+        ],
+      },
+    },
+  });
+  return id;
+}
+
+/**
+ * Upload a file to the WeChat CDN and send it as a native file message in
+ * one shot. Convenience composition of {@link uploadFileMedia} +
+ * {@link sendFileItem}; callers that retry should use the two steps
+ * separately so a send retry reuses the uploaded media instead of
+ * re-running the whole pipeline (see deliverAudio in bridge.ts).
+ *
+ * Returns the client_id used.
+ */
+export async function sendFileMessage(
+  to: string,
+  file: Buffer,
+  fileName: string,
+  opts: WeixinMediaSendOpts,
+  clientId?: string,
+  deps?: MediaSendDeps,
+): Promise<string> {
+  if (!opts.contextToken) {
+    throw new Error("contextToken is required to send a message");
+  }
+  const media = await uploadFileMedia(to, file, opts, deps);
+  return sendFileItem(to, media, fileName, opts, clientId, deps?.sendFn);
 }
 
 /**
