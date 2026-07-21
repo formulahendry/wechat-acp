@@ -828,6 +828,41 @@ test("unsupported image blob resource falls back to the placeholder instead of v
   assert.match(text, /📎 \[resource: scan\.tiff \(image\/tiff, ~\d+ bytes\) - binary content not rendered\]/);
 });
 
+test("image blob resource with showImages=false surfaces as a placeholder, not a silent drop", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({
+    onImageFlush: async (img) => { images.push(img); },
+    showImages: false,
+  });
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///chart.png",
+    mimeType: "image/png",
+    blob: PNG_BASE64,
+  });
+
+  assert.equal(images.length, 0, "hidden images must not hit the image sink");
+  assert.equal(client.hasProducedMessage, true, "resource-only turn still counts as produced output");
+  const text = await client.flush();
+  assert.match(text, /📎 \[resource: chart\.png \(image\/png, ~\d+ bytes\) - binary content not rendered\]/);
+});
+
+test("image blob resource without an image sink surfaces as a placeholder", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///chart.png",
+    mimeType: "image/png",
+    blob: PNG_BASE64,
+  });
+
+  assert.equal(client.hasProducedMessage, true);
+  const text = await client.flush();
+  assert.match(text, /📎 \[resource: chart\.png \(image\/png, ~\d+ bytes\) - binary content not rendered\]/);
+});
+
 test("text resource ending with CRLF renders without a stray carriage return", async () => {
   const client = makeClient({});
   client.newTurn();

@@ -630,13 +630,19 @@ export class WeChatAcpClient implements acp.Client {
     // Sanitized once here: the label feeds the placeholder, the logs, and
     // the value forwarded to the image pipeline.
     const mime = sanitizeInlineLabel(resource.mimeType ?? "");
-    // Route only exactly deliverable image types (base type, parameters
-    // stripped) into the image pipeline. Its allow-list miss path is
-    // log-and-skip, which is fine for image content blocks but would
-    // silently drop a resource; anything else falls through to the
-    // visible placeholder below.
+    // Route into the image pipeline only when it can actually deliver:
+    // exact allow-listed base type (parameters stripped), images enabled,
+    // and a sink configured. Every miss path in maybeSendImage other than
+    // the oversized/failure placeholders is log-and-skip, which is fine
+    // for image content blocks but would silently drop a resource (and a
+    // resource-only turn would then trigger the empty-turn notice), so
+    // anything not deliverable falls through to the visible placeholder.
     const baseMime = mime.split(";")[0].trim().toLowerCase();
-    if (SUPPORTED_IMAGE_MIME_TYPES.has(baseMime)) {
+    if (
+      SUPPORTED_IMAGE_MIME_TYPES.has(baseMime) &&
+      opts.showImages !== false &&
+      opts.onImageFlush
+    ) {
       // Route through the image pipeline so an image handed back as an
       // embedded resource behaves exactly like an image content block.
       await this.maybeSendImage({ data: resource.blob, mimeType: baseMime }, turn);
