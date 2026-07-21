@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Fix session notifications queued across a turn boundary delivering with the next turn's context. The client now captures its delivery callbacks when a notification arrives (not when the queued task runs), and the turn switch itself (`beginTurn`) runs as a task on the same serialized queue: stragglers from a failed `prompt()` deliver with their own turn's binding, and residual undelivered buffers are discarded at the boundary instead of leaking into the new turn. Fixes #54.
+- Fix session notifications queued across a turn boundary delivering with the next turn's context. All per-turn mutable state (delivery callbacks, text/thought buffers, delivery flags) now lives in a turn-state object captured when a notification arrives, and the turn switch itself (`beginTurn`) runs as a task on the same serialized queue: stragglers from a failed `prompt()` deliver with their own turn's binding, a late notification queued behind the boundary writes into its own closed turn's state instead of the new turn's buffers, and residual undelivered buffers are discarded at the boundary instead of leaking into the new turn. Fixes #54.
 
 ## 0.9.0
 

@@ -41,12 +41,30 @@ export interface WeChatAcpClientOpts {
   showImages?: boolean;
 }
 
+/**
+ * All mutable state scoped to a single prompt turn: the delivery callbacks
+ * plus the text/thought buffers and per-turn delivery flags. Notifications
+ * capture the turn object at arrival time, so a task that runs after the
+ * turn ended (queued behind `beginTurn`, or delayed by a stalled chain)
+ * reads and writes its own closed turn's state, which the next turn's
+ * `flush()` can never observe (issue 54).
+ */
+interface TurnState {
+  opts: WeChatAcpClientOpts;
+  chunks: string[];
+  thoughtChunks: string[];
+  producedMessage: boolean;
+  lastTypingAt: number;
+}
+
+function freshTurn(opts: WeChatAcpClientOpts): TurnState {
+  return { opts, chunks: [], thoughtChunks: [], producedMessage: false, lastTypingAt: 0 };
+}
+
 export class WeChatAcpClient implements acp.Client {
-  private chunks: string[] = [];
-  private thoughtChunks: string[] = [];
-  private opts: WeChatAcpClientOpts;
-  private lastTypingAt = 0;
-  private producedMessageThisTurn = false;
+  // Per-turn mutable state (callbacks, buffers, flags). Swapped wholesale by
+  // beginTurn; queued tasks operate on the turn object captured at arrival.
+  private turn: TurnState;
   // FIFO task queue serializing all session-notification handling and flush()
   // reads. The ACP SDK dispatches notifications without awaiting handlers, so
   // without this two sessionUpdate calls interleave at their first await:
@@ -60,28 +78,30 @@ export class WeChatAcpClient implements acp.Client {
 
   /** Whether the agent emitted any non-empty message content during the current turn. */
   get hasProducedMessage(): boolean {
-    return this.producedMessageThisTurn;
+    return this.turn.producedMessage;
   }
 
-  /** Reset per-turn delivery state. Called by beginTurn; exposed for tests. */
+  /** Reset the produced-message flag on the current turn. Exposed for tests;
+   * production code starts turns via beginTurn, which creates fresh state. */
   newTurn(): void {
-    this.producedMessageThisTurn = false;
+    this.turn.producedMessage = false;
   }
 
   constructor(opts: WeChatAcpClientOpts) {
-    this.opts = opts;
+    this.turn = freshTurn(opts);
   }
 
   /**
-   * Start a new turn: rebind delivery callbacks to the new turn's context and
-   * reset per-turn state. Runs as a task on the notification queue, so every
-   * task from the previous turn (including ones left queued when a failed
-   * `prompt()` rejected early) finishes delivering with its own turn's
-   * callbacks before the swap; a notification can never deliver with the next
-   * turn's binding (issue 54). Residual undelivered buffers (text the final
-   * flush never read, trailing thoughts) are discarded at the boundary
-   * instead of leaking into the new turn. Await this before sending the next
-   * prompt.
+   * Start a new turn: swap in a fresh per-turn state object (buffers, flags)
+   * bound to the new turn's delivery callbacks. Runs as a task on the
+   * notification queue, so every task from the previous turn that is already
+   * queued finishes delivering with its own turn's state before the swap.
+   * Tasks that run after the swap (a late notification queued behind this
+   * boundary while the chain was stalled) still write into the previous
+   * turn's captured state object, which the new turn's flush() can never
+   * observe; buffered residue they produce is dropped with the closed turn
+   * (issue 54). Residual undelivered buffers present at the boundary are
+   * logged and discarded. Await this before sending the next prompt.
    */
   async beginTurn(callbacks: {
     sendTyping: () => Promise<void>;
@@ -90,24 +110,22 @@ export class WeChatAcpClient implements acp.Client {
     onImageFlush?: (image: AgentImage) => Promise<void>;
   }): Promise<void> {
     return this.enqueue(async () => {
-      this.opts = {
-        ...this.opts,
+      const previous = this.turn;
+      const opts: WeChatAcpClientOpts = {
+        ...previous.opts,
         sendTyping: callbacks.sendTyping,
         onThoughtFlush: callbacks.onThoughtFlush,
         onMessageFlush: callbacks.onMessageFlush,
         ...(callbacks.onImageFlush ? { onImageFlush: callbacks.onImageFlush } : {}),
       };
-      const staleText = this.chunks.join("");
-      const staleThoughts = this.thoughtChunks.join("");
+      const staleText = previous.chunks.join("");
+      const staleThoughts = previous.thoughtChunks.join("");
       if (staleText.trim() || staleThoughts.trim()) {
-        this.opts.log(
+        opts.log(
           `[turn] discarding residue from previous turn (${staleText.length} chars text, ${staleThoughts.length} chars thoughts)`,
         );
       }
-      this.chunks = [];
-      this.thoughtChunks = [];
-      this.lastTypingAt = 0;
-      this.newTurn();
+      this.turn = freshTurn(opts);
     });
   }
 
@@ -120,7 +138,9 @@ export class WeChatAcpClient implements acp.Client {
     );
     const optionId = allowOpt?.optionId ?? params.options[0]?.optionId ?? "allow";
 
-    this.opts.log(`[permission] auto-allowed: ${params.toolCall?.title ?? "unknown"} → ${optionId}`);
+    this.turn.opts.log(
+      `[permission] auto-allowed: ${params.toolCall?.title ?? "unknown"} → ${optionId}`,
+    );
 
     return {
       outcome: {
@@ -143,53 +163,55 @@ export class WeChatAcpClient implements acp.Client {
   }
 
   async sessionUpdate(params: acp.SessionNotification): Promise<void> {
-    // Bind the notification to the callbacks active at arrival time. A task
+    // Bind the notification to the turn state active at arrival time. A task
     // can sit queued across a turn boundary (beginTurn's swap is enqueued
-    // behind it), and a straggler can even arrive while the previous turn's
-    // residue is still draining; capturing here guarantees it delivers with
-    // the binding of the turn it belongs to, never the next turn's (issue 54).
-    const opts = this.opts;
-    return this.enqueue(() => this.handleSessionUpdate(params, opts));
+    // behind it), or even end up queued after the boundary task when a
+    // stalled chain delays the swap; operating on the captured turn object
+    // guarantees it reads and writes the state of the turn it belongs to,
+    // never the next turn's buffers or callbacks (issue 54).
+    const turn = this.turn;
+    return this.enqueue(() => this.handleSessionUpdate(params, turn));
   }
 
   private async handleSessionUpdate(
     params: acp.SessionNotification,
-    opts: WeChatAcpClientOpts,
+    turn: TurnState,
   ): Promise<void> {
     const update = params.update;
+    const opts = turn.opts;
 
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
-        await this.maybeFlushThoughts(opts);
+        await this.maybeFlushThoughts(turn);
         if (update.content.type === "text") {
-          this.chunks.push(update.content.text);
+          turn.chunks.push(update.content.text);
           if (update.content.text.trim()) {
-            this.producedMessageThisTurn = true;
+            turn.producedMessage = true;
           }
         } else if (update.content.type === "image") {
-          await this.maybeSendImage(update.content, opts);
+          await this.maybeSendImage(update.content, turn);
         }
         // Throttle typing indicators
-        await this.maybeSendTyping(opts);
+        await this.maybeSendTyping(turn);
         break;
 
       case "tool_call":
-        await this.maybeFlushThoughts(opts);
-        await this.maybeFlushMessage(opts);
+        await this.maybeFlushThoughts(turn);
+        await this.maybeFlushMessage(turn);
         opts.log(`[tool] ${update.title} (${update.status})`);
-        await this.maybeSendTyping(opts);
+        await this.maybeSendTyping(turn);
         break;
 
       case "agent_thought_chunk":
-        await this.maybeFlushMessage(opts);
+        await this.maybeFlushMessage(turn);
         if (update.content.type === "text") {
           const text = update.content.text;
           opts.log(`[thought] ${text.length > 80 ? text.substring(0, 80) + "..." : text}`);
           if (opts.showThoughts) {
-            this.thoughtChunks.push(text);
+            turn.thoughtChunks.push(text);
           }
         }
-        await this.maybeSendTyping(opts);
+        await this.maybeSendTyping(turn);
         break;
 
       case "tool_call_update": {
@@ -209,11 +231,11 @@ export class WeChatAcpClient implements acp.Client {
               if (diff.newText != null) {
                 for (const l of diff.newText.split("\n")) lines.push(`+ ${l}`);
               }
-              this.chunks.push("\n```diff\n" + lines.join("\n") + "\n```\n");
-              this.producedMessageThisTurn = true;
+              turn.chunks.push("\n```diff\n" + lines.join("\n") + "\n```\n");
+              turn.producedMessage = true;
             } else if (c.type === "content" && c.content.type === "image") {
               imageContentBlocks++;
-              await this.maybeSendImage(c.content, opts);
+              await this.maybeSendImage(c.content, turn);
             }
           }
         }
@@ -224,7 +246,7 @@ export class WeChatAcpClient implements acp.Client {
         // populates both fields never delivers the same image twice.
         let rawOutputImages = 0;
         if (update.status === "completed" && imageContentBlocks === 0) {
-          rawOutputImages = await this.maybeSendRawOutputImages(update.rawOutput, opts);
+          rawOutputImages = await this.maybeSendRawOutputImages(update.rawOutput, turn);
         }
         if (update.status) {
           // Surface where images came from so field issues like issue 55
@@ -237,7 +259,7 @@ export class WeChatAcpClient implements acp.Client {
                 : "";
           opts.log(`[tool] ${update.toolCallId} → ${update.status}${imageNote}`);
         }
-        await this.maybeSendTyping(opts);
+        await this.maybeSendTyping(turn);
         break;
       }
 
@@ -249,7 +271,7 @@ export class WeChatAcpClient implements acp.Client {
             .join("\n");
           opts.log(`[plan]\n${items}`);
         }
-        await this.maybeSendTyping(opts);
+        await this.maybeSendTyping(turn);
         break;
 
       case "config_option_update":
@@ -282,14 +304,14 @@ export class WeChatAcpClient implements acp.Client {
     // Joins the task queue so any in-flight notification work (a pending text
     // send, an image upload) completes before the buffer is read. This also
     // guarantees hasProducedMessage is final when flush() resolves, so an
-    // image-only turn is never mistaken for an empty one. Captures the
-    // callbacks at call time for the same reason sessionUpdate does.
-    const opts = this.opts;
+    // image-only turn is never mistaken for an empty one. Captures the turn
+    // state at call time for the same reason sessionUpdate does.
+    const turn = this.turn;
     return this.enqueue(async () => {
-      await this.maybeFlushThoughts(opts);
-      const text = this.chunks.join("");
-      this.chunks = [];
-      this.lastTypingAt = 0;
+      await this.maybeFlushThoughts(turn);
+      const text = turn.chunks.join("");
+      turn.chunks = [];
+      turn.lastTypingAt = 0;
       return text;
     });
   }
@@ -303,10 +325,7 @@ export class WeChatAcpClient implements acp.Client {
    * anything malformed is ignored. Returns the number of valid image entries
    * handed to `maybeSendImage`, so the caller can log the delivery source.
    */
-  private async maybeSendRawOutputImages(
-    rawOutput: unknown,
-    opts: WeChatAcpClientOpts,
-  ): Promise<number> {
+  private async maybeSendRawOutputImages(rawOutput: unknown, turn: TurnState): Promise<number> {
     if (typeof rawOutput !== "object" || rawOutput === null) {
       return 0;
     }
@@ -334,7 +353,7 @@ export class WeChatAcpClient implements acp.Client {
         mimeType.trim()
       ) {
         images++;
-        await this.maybeSendImage({ data, mimeType }, opts);
+        await this.maybeSendImage({ data, mimeType }, turn);
       }
     }
     return images;
@@ -352,8 +371,9 @@ export class WeChatAcpClient implements acp.Client {
    */
   private async maybeSendImage(
     image: { data: string; mimeType: string },
-    opts: WeChatAcpClientOpts,
+    turn: TurnState,
   ): Promise<void> {
+    const opts = turn.opts;
     // Trim once here so every image path (content block, message chunk,
     // rawOutput fallback) validates and delivers the same normalized value.
     const mimeType = image.mimeType.trim();
@@ -374,8 +394,8 @@ export class WeChatAcpClient implements acp.Client {
     const approxBytes = Math.ceil(image.data.length / 4) * 3;
     if (approxBytes > MAX_IMAGE_BYTES) {
       opts.log(`[image] skipped oversized image (~${approxBytes} bytes > ${MAX_IMAGE_BYTES})`);
-      this.chunks.push("\n⚠️ [image too large to deliver]\n");
-      this.producedMessageThisTurn = true;
+      turn.chunks.push("\n⚠️ [image too large to deliver]\n");
+      turn.producedMessage = true;
       return;
     }
 
@@ -385,7 +405,7 @@ export class WeChatAcpClient implements acp.Client {
     // now. Strict ordering is knowingly traded for content preservation
     // here; dropping or deferring a deliverable image because a text
     // segment hit a transient send failure would lose more than it saves.
-    await this.maybeFlushMessage(opts);
+    await this.maybeFlushMessage(turn);
 
     try {
       // Single attempt here: the bridge-side sink owns retries (with a stable
@@ -393,28 +413,28 @@ export class WeChatAcpClient implements acp.Client {
       // would multiply CDN uploads.
       await opts.onImageFlush({ data: image.data, mimeType });
       opts.log(`[image] sent (${mimeType}, ~${approxBytes} bytes)`);
-      this.producedMessageThisTurn = true;
+      turn.producedMessage = true;
     } catch (err) {
       opts.log(`[image] delivery failed: ${String(err)}`);
       // Queue serialization means no later text has been buffered yet, so the
       // placeholder lands exactly where the image belonged in the stream.
-      this.chunks.push("\n⚠️ [image could not be delivered]\n");
-      this.producedMessageThisTurn = true;
+      turn.chunks.push("\n⚠️ [image could not be delivered]\n");
+      turn.producedMessage = true;
     }
   }
 
-  private async maybeFlushThoughts(opts: WeChatAcpClientOpts): Promise<void> {
-    if (this.thoughtChunks.length === 0) return;
-    const thoughtText = this.thoughtChunks.join("");
-    this.thoughtChunks = [];
+  private async maybeFlushThoughts(turn: TurnState): Promise<void> {
+    if (turn.thoughtChunks.length === 0) return;
+    const thoughtText = turn.thoughtChunks.join("");
+    turn.thoughtChunks = [];
     if (!thoughtText.trim()) return;
     const ok = await this.sendWithRetry(
-      () => opts.onThoughtFlush(`💭 [Thinking]\n${thoughtText}`),
+      () => turn.opts.onThoughtFlush(`💭 [Thinking]\n${thoughtText}`),
       "thought",
-      opts,
+      turn,
     );
     if (!ok) {
-      opts.log(`[flush] dropping ${thoughtText.length} chars of thought after retries`);
+      turn.opts.log(`[flush] dropping ${thoughtText.length} chars of thought after retries`);
     }
   }
 
@@ -426,21 +446,21 @@ export class WeChatAcpClient implements acp.Client {
    * within a task on the notification queue, which guarantees FIFO send
    * order without needing its own mutex.
    */
-  private async maybeFlushMessage(opts: WeChatAcpClientOpts): Promise<void> {
-    if (this.chunks.length === 0) return;
-    const text = this.chunks.join("");
-    this.chunks = [];
+  private async maybeFlushMessage(turn: TurnState): Promise<void> {
+    if (turn.chunks.length === 0) return;
+    const text = turn.chunks.join("");
+    turn.chunks = [];
     if (!text.trim()) {
       return;
     }
 
-    const ok = await this.sendWithRetry(() => opts.onMessageFlush(text), "message", opts);
+    const ok = await this.sendWithRetry(() => turn.opts.onMessageFlush(text), "message", turn);
     if (!ok) {
       // Send failed after all retries. Prepend the unsent text back so the
       // final flush() returns it and session.ts re-attempts via onReply (which
       // surfaces failure to the user).
-      this.chunks = [text, ...this.chunks];
-      opts.log(
+      turn.chunks = [text, ...turn.chunks];
+      turn.opts.log(
         `[flush] message send failed after retries; retaining ${text.length} chars for final flush`,
       );
     }
@@ -455,14 +475,14 @@ export class WeChatAcpClient implements acp.Client {
   private async sendWithRetry(
     send: () => Promise<void>,
     label: string,
-    opts: WeChatAcpClientOpts,
+    turn: TurnState,
   ): Promise<boolean> {
     for (let attempt = 1; attempt <= WeChatAcpClient.SEND_MAX_ATTEMPTS; attempt++) {
       try {
         await send();
         return true;
       } catch (err) {
-        opts.log(
+        turn.opts.log(
           `[flush] ${label} send failed (attempt ${attempt}/${WeChatAcpClient.SEND_MAX_ATTEMPTS}): ${String(err)}`,
         );
         if (attempt < WeChatAcpClient.SEND_MAX_ATTEMPTS) {
@@ -473,12 +493,12 @@ export class WeChatAcpClient implements acp.Client {
     return false;
   }
 
-  private async maybeSendTyping(opts: WeChatAcpClientOpts): Promise<void> {
+  private async maybeSendTyping(turn: TurnState): Promise<void> {
     const now = Date.now();
-    if (now - this.lastTypingAt < WeChatAcpClient.TYPING_INTERVAL_MS) return;
-    this.lastTypingAt = now;
+    if (now - turn.lastTypingAt < WeChatAcpClient.TYPING_INTERVAL_MS) return;
+    turn.lastTypingAt = now;
     try {
-      await opts.sendTyping();
+      await turn.opts.sendTyping();
     } catch {
       // typing is best-effort
     }

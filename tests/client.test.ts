@@ -636,3 +636,46 @@ test("beginTurn discards residual undelivered text instead of leaking it into th
   assert.equal(text, "", "turn-1 residue must not surface in turn 2's flush");
   assert.equal(client.hasProducedMessage, false, "beginTurn must reset per-turn state");
 });
+
+test("late old-turn notification queued after beginTurn cannot leak into the new turn", async () => {
+  /**
+   * Maintainer repro on PR 57: block a turn-1 image task so the chain
+   * stalls, enqueue turn-2 beginTurn, then let a turn-1 text notification
+   * arrive. It captures turn-1 state at arrival but runs after the boundary
+   * task. With buffers shared on the client it wrote into the freshly reset
+   * fields and turn 2's flush() returned turn-1 text under the new context;
+   * with per-turn state it writes into the closed turn's object instead.
+   */
+  const turn2Messages: string[] = [];
+  let releaseImage!: () => void;
+
+  const client = makeClient({});
+  await client.beginTurn(
+    turnCallbacks({
+      onImageFlush: async () => {
+        await new Promise<void>((r) => { releaseImage = r; });
+      },
+    }),
+  );
+
+  // Turn-1 image task blocks the chain.
+  const blocked = emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
+  // Turn-2 boundary task queues behind it.
+  const turn2 = client.beginTurn(turnCallbacks({ messages: turn2Messages }));
+  // Late turn-1 text arrives after beginTurn was enqueued: it must bind to
+  // turn-1 state even though it runs after the swap.
+  const lateText = emitMessageChunk(client, "stale turn-1 text");
+
+  await new Promise((r) => setTimeout(r, 10));
+  releaseImage();
+  await Promise.all([blocked, turn2, lateText]);
+
+  const text = await client.flush();
+  assert.equal(text, "", "turn-2 flush must not return turn-1 text");
+  assert.equal(
+    client.hasProducedMessage,
+    false,
+    "late turn-1 text must not mark turn 2 as having produced output",
+  );
+  assert.deepEqual(turn2Messages, [], "turn 2 sinks must stay untouched");
+});
