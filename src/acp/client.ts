@@ -111,19 +111,30 @@ function sanitizeInlineLabel(value: string): string {
 /**
  * Human-readable name for a resource: the last path segment of its URI,
  * percent-decoded and sanitized to a single line. Falls back to the full
- * URI when there is no useful segment (e.g. `untitled:Untitled-1`, a bare
- * scheme, or an empty URI), and to `resource` when nothing printable
- * survives sanitization.
+ * URI when there is no useful path segment (e.g. `untitled:Untitled-1`,
+ * an authority with no path like `https://example.com`, or an empty URI),
+ * and to `resource` when nothing printable survives sanitization.
  */
 function resourceDisplayName(uri: string): string {
   const trimmed = uri.trim();
   if (!trimmed) return "resource";
   const stripped = trimmed.replace(/[?#].*$/, "");
-  const segments = stripped.split("/").filter((s) => s.length > 0);
+  const schemeMatch = stripped.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:/);
+  const rest = schemeMatch ? stripped.slice(schemeMatch[0].length) : stripped;
+  let path = rest;
+  if (rest.startsWith("//")) {
+    // Hierarchical URI: drop the authority so a bare host is never
+    // mistaken for a path segment (https://example.com has no path).
+    const slash = rest.indexOf("/", 2);
+    path = slash >= 0 ? rest.slice(slash) : "";
+  } else if (schemeMatch && !rest.includes("/")) {
+    // Opaque URI (untitled:Untitled-1): no path to extract.
+    path = "";
+  }
+  const segments = path.split("/").filter((s) => s.length > 0);
   const last = segments[segments.length - 1] ?? "";
   let name: string;
-  // A lone scheme-bearing segment is not a useful name.
-  if (!last || (segments.length === 1 && last.includes(":"))) {
+  if (!last) {
     name = trimmed;
   } else {
     try {
@@ -136,7 +147,9 @@ function resourceDisplayName(uri: string): string {
 }
 
 function resourceFenceLanguage(name: string, mimeType?: string | null): string {
-  const mime = mimeType?.trim().toLowerCase() ?? "";
+  // Strip MIME parameters (application/json; charset=utf-8) before the
+  // lookup, matching the base-type normalization in the blob path.
+  const mime = mimeType?.split(";")[0].trim().toLowerCase() ?? "";
   // Object.hasOwn, not `in`: prototype-chain keys like "toString" must not
   // resolve to a language.
   if (mime && Object.hasOwn(RESOURCE_MIME_LANGUAGES, mime)) {
@@ -151,10 +164,21 @@ function resourceFenceLanguage(name: string, mimeType?: string | null): string {
 }
 
 /**
+ * Cap on the rendered fence length. Inner backtick runs of this length or
+ * longer are squeezed to one tick shorter so the fence still contains the
+ * body; without the cap, an adversarial run of backticks would force a
+ * fence thousands of characters long, blowing the one-segment bound and
+ * risking a mid-fence split downstream.
+ */
+const MAX_FENCE_TICKS = 8;
+
+/**
  * Render a text resource as a fenced code block with a one-line header
  * naming it. The fence is longer than any backtick run inside the body so
- * the content cannot break out; bodies above {@link MAX_RESOURCE_TEXT_CHARS}
- * are truncated with an explicit tail line inside the fence.
+ * the content cannot break out, capped at {@link MAX_FENCE_TICKS} (longer
+ * inner runs are squeezed to fit); bodies above
+ * {@link MAX_RESOURCE_TEXT_CHARS} are truncated with an explicit tail line
+ * inside the fence.
  */
 function renderTextResource(name: string, mimeType: string | null | undefined, text: string): string {
   let body = text;
@@ -164,8 +188,9 @@ function renderTextResource(name: string, mimeType: string | null | undefined, t
       `\n... [truncated, ${text.length - MAX_RESOURCE_TEXT_CHARS} more chars]`;
   }
   body = body.replace(/(\r\n|\n|\r)$/, "");
+  body = body.replace(new RegExp("`{" + MAX_FENCE_TICKS + ",}", "g"), "`".repeat(MAX_FENCE_TICKS - 1));
   const longestRun = body.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
-  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  const fence = "`".repeat(Math.max(3, Math.min(longestRun + 1, MAX_FENCE_TICKS)));
   const lang = resourceFenceLanguage(name, mimeType);
   const mime = mimeType ? sanitizeInlineLabel(mimeType) : "";
   const mimeNote = mime ? ` (${mime})` : "";

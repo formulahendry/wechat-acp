@@ -839,6 +839,49 @@ test("text resource ending with CRLF renders without a stray carriage return", a
   assert.ok(!/\r\n```/.test(text), "no stray CR before the closing fence");
 });
 
+test("authority-only URI falls back to the full URI instead of the bare host", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallResource(client, { uri: "https://example.com", text: "hello" });
+  await emitToolCallResource(client, { uri: "https://example.org/", text: "hello" });
+
+  const text = await client.flush();
+  assert.match(text, /📎 https:\/\/example\.com\n/);
+  assert.match(text, /📎 https:\/\/example\.org\/\n/);
+  assert.ok(!/📎 example\.com/.test(text), "bare host must not be shown as the name");
+});
+
+test("MIME parameters do not defeat the fence language hint", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///data",
+    mimeType: "application/json; charset=utf-8",
+    text: '{"a": 1}',
+  });
+
+  const text = await client.flush();
+  assert.match(text, /```json\n/);
+});
+
+test("adversarial backtick run keeps the fence bounded and contained", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  const body = "start\n" + "`".repeat(3000) + "\nend";
+  await emitToolCallResource(client, { uri: "file:///ticks.txt", text: body });
+
+  const text = await client.flush();
+  const runs = text.match(/`+/g) ?? [];
+  const longest = runs.reduce((m, r) => Math.max(m, r.length), 0);
+  assert.equal(longest, 8, "fence is capped at 8 ticks");
+  const fenceLines = text.split("\n").filter((l) => /^`{8}/.test(l));
+  assert.equal(fenceLines.length, 2, "opening and closing fences present");
+  assert.ok(text.length < 300, `render stays bounded, got ${text.length}`);
+});
+
 // ---------------------------------------------------------------------------
 // Cross-turn callback binding (issue 54)
 // ---------------------------------------------------------------------------
