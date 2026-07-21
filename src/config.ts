@@ -132,6 +132,12 @@ export interface WeChatAcpConfig {
      * `--hide-images`) to drop them.
      */
     showImages?: boolean;
+    /**
+     * Deliver agent-produced ACP `audio` content blocks as WeChat file
+     * messages. Defaults to `true`; set to `false` (or pass
+     * `--hide-audio`) to drop them.
+     */
+    showAudio?: boolean;
   };
   agents: Record<string, AgentPreset>;
   session: {
@@ -203,6 +209,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       showThoughts: true,
       showDiffs: false,
       showImages: true,
+      showAudio: true,
     },
     agents: { ...BUILT_IN_AGENTS },
     session: {

@@ -29,16 +29,51 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
 /** Sanity cap on decoded image size (10 MiB). */
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
+/** An audio content block produced by the agent, ready for outbound delivery. */
+export interface AgentAudio {
+  /** Base64-encoded audio bytes. */
+  data: string;
+  mimeType: string;
+}
+
+/**
+ * Audio formats forwarded to WeChat, mapped to the file extension used in
+ * the generated file name. Audio is delivered as a file message rather
+ * than a voice bubble (voice items require SILK-encoded payloads with a
+ * computed play time); the extension is what lets the WeChat client open
+ * the file card with an audio player.
+ */
+export const AUDIO_MIME_EXTENSIONS: Readonly<Record<string, string>> = {
+  "audio/wav": "wav",
+  "audio/x-wav": "wav",
+  "audio/wave": "wav",
+  "audio/mpeg": "mp3",
+  "audio/mp3": "mp3",
+  "audio/ogg": "ogg",
+  "audio/mp4": "m4a",
+  "audio/m4a": "m4a",
+  "audio/x-m4a": "m4a",
+  "audio/aac": "aac",
+  "audio/flac": "flac",
+  "audio/x-flac": "flac",
+  "audio/webm": "webm",
+};
+
+/** Sanity cap on decoded audio size (25 MiB). */
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+
 export interface WeChatAcpClientOpts {
   sendTyping: () => Promise<void>;
   onThoughtFlush: (text: string) => Promise<void>;
   onMessageFlush: (text: string) => Promise<void>;
   onImageFlush?: (image: AgentImage) => Promise<void>;
+  onAudioFlush?: (audio: AgentAudio) => Promise<void>;
   onConfigOptionsUpdate?: (configOptions: acp.SessionConfigOption[]) => void;
   log: (msg: string) => void;
   showThoughts: boolean;
   showDiffs?: boolean;
   showImages?: boolean;
+  showAudio?: boolean;
 }
 
 /**
@@ -108,6 +143,7 @@ export class WeChatAcpClient implements acp.Client {
     onThoughtFlush: (text: string) => Promise<void>;
     onMessageFlush: (text: string) => Promise<void>;
     onImageFlush?: (image: AgentImage) => Promise<void>;
+    onAudioFlush?: (audio: AgentAudio) => Promise<void>;
   }): Promise<void> {
     return this.enqueue(async () => {
       const previous = this.turn;
@@ -117,6 +153,7 @@ export class WeChatAcpClient implements acp.Client {
         onThoughtFlush: callbacks.onThoughtFlush,
         onMessageFlush: callbacks.onMessageFlush,
         ...(callbacks.onImageFlush ? { onImageFlush: callbacks.onImageFlush } : {}),
+        ...(callbacks.onAudioFlush ? { onAudioFlush: callbacks.onAudioFlush } : {}),
       };
       const staleText = previous.chunks.join("");
       const staleThoughts = previous.thoughtChunks.join("");
@@ -190,6 +227,8 @@ export class WeChatAcpClient implements acp.Client {
           }
         } else if (update.content.type === "image") {
           await this.maybeSendImage(update.content, turn);
+        } else if (update.content.type === "audio") {
+          await this.maybeSendAudio(update.content, turn);
         }
         // Throttle typing indicators
         await this.maybeSendTyping(turn);
@@ -236,6 +275,8 @@ export class WeChatAcpClient implements acp.Client {
             } else if (c.type === "content" && c.content.type === "image") {
               imageContentBlocks++;
               await this.maybeSendImage(c.content, turn);
+            } else if (c.type === "content" && c.content.type === "audio") {
+              await this.maybeSendAudio(c.content, turn);
             }
           }
         }
@@ -419,6 +460,58 @@ export class WeChatAcpClient implements acp.Client {
       // Queue serialization means no later text has been buffered yet, so the
       // placeholder lands exactly where the image belonged in the stream.
       turn.chunks.push("\n⚠️ [image could not be delivered]\n");
+      turn.producedMessage = true;
+    }
+  }
+
+  /**
+   * Deliver an agent-produced audio content block as a WeChat file message,
+   * mirroring the {@link maybeSendImage} pipeline: buffered text preceding
+   * the audio is flushed first, the sink gets exactly one attempt (the
+   * bridge owns retries with a stable client_id), and an oversized payload
+   * or a failed delivery is replaced with a placeholder in the text stream
+   * so the turn never silently loses content.
+   */
+  private async maybeSendAudio(
+    audio: { data: string; mimeType: string },
+    turn: TurnState,
+  ): Promise<void> {
+    const opts = turn.opts;
+    const mimeType = audio.mimeType.trim();
+    if (opts.showAudio === false) {
+      opts.log(`[audio] skipped (showAudio=false, ${mimeType})`);
+      return;
+    }
+    if (!opts.onAudioFlush) {
+      opts.log(`[audio] skipped (no audio sink configured, ${mimeType})`);
+      return;
+    }
+    // Object.hasOwn, not `in`: a hostile mimeType like "toString" must not
+    // pass the gate via the prototype chain.
+    if (!Object.hasOwn(AUDIO_MIME_EXTENSIONS, mimeType.toLowerCase())) {
+      opts.log(`[audio] skipped unsupported type: ${mimeType}`);
+      return;
+    }
+    // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes; fine for a cap.
+    const approxBytes = Math.ceil(audio.data.length / 4) * 3;
+    if (approxBytes > MAX_AUDIO_BYTES) {
+      opts.log(`[audio] skipped oversized audio (~${approxBytes} bytes > ${MAX_AUDIO_BYTES})`);
+      turn.chunks.push("\n⚠️ [audio too large to deliver]\n");
+      turn.producedMessage = true;
+      return;
+    }
+
+    // Flush any text buffered before this audio so ordering is preserved.
+    // Same degraded mode as images: content preservation over strict order.
+    await this.maybeFlushMessage(turn);
+
+    try {
+      await opts.onAudioFlush({ data: audio.data, mimeType });
+      opts.log(`[audio] sent (${mimeType}, ~${approxBytes} bytes)`);
+      turn.producedMessage = true;
+    } catch (err) {
+      opts.log(`[audio] delivery failed: ${String(err)}`);
+      turn.chunks.push("\n⚠️ [audio could not be delivered]\n");
       turn.producedMessage = true;
     }
   }
