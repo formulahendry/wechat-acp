@@ -135,6 +135,7 @@ export class WeChatAcpBridge {
       showThoughts: this.config.agent.showThoughts,
       showDiffs: this.config.agent.showDiffs ?? false,
       showImages: this.config.agent.showImages ?? true,
+      showResources: this.config.agent.showResources ?? true,
       log: this.log,
       onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
       onReplyImage: (userId, contextToken, image) => this.sendImageReply(userId, contextToken, image),

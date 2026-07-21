@@ -29,6 +29,124 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set([
 /** Sanity cap on decoded image size (10 MiB). */
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
+/**
+ * Cap on inline text-resource rendering: one WeChat segment
+ * (TEXT_CHUNK_LIMIT in bridge.ts). Resources are context payloads; the cap
+ * keeps a single resource from flooding a turn with dozens of segments.
+ */
+const MAX_RESOURCE_TEXT_CHARS = 4000;
+
+/** Fence language hints by MIME type; extensions fill the gaps. */
+const RESOURCE_MIME_LANGUAGES: Readonly<Record<string, string>> = {
+  "application/json": "json",
+  "application/javascript": "javascript",
+  "text/javascript": "javascript",
+  "text/x-python": "python",
+  "text/html": "html",
+  "text/css": "css",
+  "text/xml": "xml",
+  "application/xml": "xml",
+  "text/markdown": "markdown",
+  "text/yaml": "yaml",
+  "application/x-yaml": "yaml",
+  "application/x-sh": "bash",
+  "text/x-shellscript": "bash",
+};
+
+/** Fence language hints by file extension of the resource name. */
+const RESOURCE_EXT_LANGUAGES: Readonly<Record<string, string>> = {
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  jsx: "jsx",
+  ts: "typescript",
+  tsx: "tsx",
+  py: "python",
+  json: "json",
+  html: "html",
+  htm: "html",
+  css: "css",
+  xml: "xml",
+  yml: "yaml",
+  yaml: "yaml",
+  md: "markdown",
+  sh: "bash",
+  bash: "bash",
+  ps1: "powershell",
+  go: "go",
+  rs: "rust",
+  java: "java",
+  kt: "kotlin",
+  c: "c",
+  h: "c",
+  cpp: "cpp",
+  cs: "csharp",
+  rb: "ruby",
+  php: "php",
+  sql: "sql",
+  diff: "diff",
+  patch: "diff",
+  toml: "toml",
+  ini: "ini",
+};
+
+/**
+ * Human-readable name for a resource: the last path segment of its URI,
+ * percent-decoded. Falls back to the full URI when there is no useful
+ * segment (e.g. `untitled:Untitled-1`, a bare scheme, or an empty URI).
+ */
+function resourceDisplayName(uri: string): string {
+  const trimmed = uri.trim();
+  if (!trimmed) return "resource";
+  const stripped = trimmed.replace(/[?#].*$/, "");
+  const segments = stripped.split("/").filter((s) => s.length > 0);
+  const last = segments[segments.length - 1] ?? "";
+  // A lone scheme-bearing segment is not a useful name.
+  if (!last || (segments.length === 1 && last.includes(":"))) return trimmed;
+  try {
+    return decodeURIComponent(last);
+  } catch {
+    return last;
+  }
+}
+
+function resourceFenceLanguage(name: string, mimeType?: string | null): string {
+  const mime = mimeType?.trim().toLowerCase() ?? "";
+  // Object.hasOwn, not `in`: prototype-chain keys like "toString" must not
+  // resolve to a language.
+  if (mime && Object.hasOwn(RESOURCE_MIME_LANGUAGES, mime)) {
+    return RESOURCE_MIME_LANGUAGES[mime];
+  }
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot + 1).toLowerCase() : "";
+  if (ext && Object.hasOwn(RESOURCE_EXT_LANGUAGES, ext)) {
+    return RESOURCE_EXT_LANGUAGES[ext];
+  }
+  return "";
+}
+
+/**
+ * Render a text resource as a fenced code block with a one-line header
+ * naming it. The fence is longer than any backtick run inside the body so
+ * the content cannot break out; bodies above {@link MAX_RESOURCE_TEXT_CHARS}
+ * are truncated with an explicit tail line inside the fence.
+ */
+function renderTextResource(name: string, mimeType: string | null | undefined, text: string): string {
+  let body = text;
+  if (text.length > MAX_RESOURCE_TEXT_CHARS) {
+    body =
+      text.slice(0, MAX_RESOURCE_TEXT_CHARS) +
+      `\n... [truncated, ${text.length - MAX_RESOURCE_TEXT_CHARS} more chars]`;
+  }
+  body = body.replace(/\n$/, "");
+  const longestRun = body.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
+  const fence = "`".repeat(Math.max(3, longestRun + 1));
+  const lang = resourceFenceLanguage(name, mimeType);
+  const mime = mimeType?.trim();
+  const mimeNote = mime ? ` (${mime})` : "";
+  return `\n📎 ${name}${mimeNote}\n${fence}${lang}\n${body}\n${fence}\n`;
+}
+
 export interface WeChatAcpClientOpts {
   sendTyping: () => Promise<void>;
   onThoughtFlush: (text: string) => Promise<void>;
@@ -39,6 +157,7 @@ export interface WeChatAcpClientOpts {
   showThoughts: boolean;
   showDiffs?: boolean;
   showImages?: boolean;
+  showResources?: boolean;
 }
 
 /**
@@ -190,6 +309,8 @@ export class WeChatAcpClient implements acp.Client {
           }
         } else if (update.content.type === "image") {
           await this.maybeSendImage(update.content, turn);
+        } else if (update.content.type === "resource") {
+          await this.maybeRenderResource(update.content.resource, turn);
         }
         // Throttle typing indicators
         await this.maybeSendTyping(turn);
@@ -236,6 +357,8 @@ export class WeChatAcpClient implements acp.Client {
             } else if (c.type === "content" && c.content.type === "image") {
               imageContentBlocks++;
               await this.maybeSendImage(c.content, turn);
+            } else if (c.type === "content" && c.content.type === "resource") {
+              await this.maybeRenderResource(c.content.resource, turn);
             }
           }
         }
@@ -421,6 +544,54 @@ export class WeChatAcpClient implements acp.Client {
       turn.chunks.push("\n⚠️ [image could not be delivered]\n");
       turn.producedMessage = true;
     }
+  }
+
+  /**
+   * Render an agent-produced embedded resource content block (issue 59).
+   * Text resources are appended to the text stream as a fenced code block
+   * with a naming header, so they flush in order with the surrounding
+   * narrative through the existing buffer machinery. Blob resources with
+   * an image MIME type reuse the image delivery pipeline (allow-list,
+   * size cap, ordering, placeholders); other blobs surface as a one-line
+   * placeholder instead of being dropped silently.
+   */
+  private async maybeRenderResource(
+    resource: acp.EmbeddedResource["resource"],
+    turn: TurnState,
+  ): Promise<void> {
+    const opts = turn.opts;
+    const name = resourceDisplayName(resource.uri);
+    if (opts.showResources === false) {
+      opts.log(`[resource] skipped (showResources=false, ${name})`);
+      return;
+    }
+
+    if ("text" in resource) {
+      if (!resource.text.trim()) {
+        opts.log(`[resource] skipped empty text resource: ${name}`);
+        return;
+      }
+      turn.chunks.push(renderTextResource(name, resource.mimeType, resource.text));
+      turn.producedMessage = true;
+      opts.log(`[resource] rendered text resource ${name} (${resource.text.length} chars)`);
+      return;
+    }
+
+    const mime = resource.mimeType?.trim() ?? "";
+    if (mime.toLowerCase().startsWith("image/")) {
+      // Route through the image pipeline so an image handed back as an
+      // embedded resource behaves exactly like an image content block.
+      await this.maybeSendImage({ data: resource.blob, mimeType: mime }, turn);
+      return;
+    }
+
+    // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes.
+    const approxBytes = Math.ceil(resource.blob.length / 4) * 3;
+    turn.chunks.push(
+      `\n📎 [resource: ${name} (${mime || "unknown type"}, ~${approxBytes} bytes) - binary content not rendered]\n`,
+    );
+    turn.producedMessage = true;
+    opts.log(`[resource] blob resource ${name} not rendered (${mime || "unknown type"}, ~${approxBytes} bytes)`);
   }
 
   private async maybeFlushThoughts(turn: TurnState): Promise<void> {

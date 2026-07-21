@@ -21,6 +21,7 @@ function makeClient(opts: {
   onThoughtFlush?: (text: string) => Promise<void>;
   onImageFlush?: (image: AgentImage) => Promise<void>;
   showImages?: boolean;
+  showResources?: boolean;
   sendDelay?: number;
   log?: (msg: string) => void;
 }): WeChatAcpClient {
@@ -43,6 +44,7 @@ function makeClient(opts: {
     log: opts.log ?? (() => {}),
     showThoughts: false,
     showImages: opts.showImages,
+    showResources: opts.showResources,
   });
 }
 
@@ -103,6 +105,33 @@ async function emitMessageChunkImage(
 ): Promise<void> {
   await client.sessionUpdate({
     update: { sessionUpdate: "agent_message_chunk", content: { type: "image", ...image } },
+  } as never);
+}
+
+type ResourceContents =
+  | { uri: string; text: string; mimeType?: string }
+  | { uri: string; blob: string; mimeType?: string };
+
+async function emitToolCallResource(
+  client: WeChatAcpClient,
+  resource: ResourceContents,
+): Promise<void> {
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-res-1",
+      status: "completed",
+      content: [{ type: "content", content: { type: "resource", resource } }],
+    },
+  } as never);
+}
+
+async function emitMessageChunkResource(
+  client: WeChatAcpClient,
+  resource: ResourceContents,
+): Promise<void> {
+  await client.sessionUpdate({
+    update: { sessionUpdate: "agent_message_chunk", content: { type: "resource", resource } },
   } as never);
 }
 
@@ -542,6 +571,164 @@ test("failure placeholder keeps stream position when text arrives during the ima
   assert.ok(placeholderAt >= 0, "placeholder must be present");
   assert.ok(textAt >= 0, "later text must be preserved");
   assert.ok(placeholderAt < textAt, `placeholder must precede later text, got: ${JSON.stringify(text)}`);
+});
+
+// ---------------------------------------------------------------------------
+// Embedded resource content blocks (issue 59)
+// ---------------------------------------------------------------------------
+
+test("text resource in completed tool_call_update renders as a fenced block with header", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///home/user/script.py",
+    mimeType: "text/x-python",
+    text: "def hello():\n    print('Hello, world!')",
+  });
+
+  const text = await client.flush();
+  assert.match(text, /📎 script\.py \(text\/x-python\)/);
+  assert.match(text, /```python\n/);
+  assert.match(text, /def hello\(\):/);
+  assert.match(text, /```\n/);
+  assert.equal(client.hasProducedMessage, true, "resource-only turn counts as produced output");
+});
+
+test("text resource in agent_message_chunk renders in stream order with surrounding text", async () => {
+  const flushed: string[] = [];
+  const client = makeClient({ onMessageFlush: async (t) => { flushed.push(t); } });
+
+  await emitMessageChunk(client, "config file below:");
+  await emitMessageChunkResource(client, {
+    uri: "file:///app/config.json",
+    mimeType: "application/json",
+    text: '{"a": 1}',
+  });
+  await emitToolCall(client); // boundary forces a flush
+
+  assert.equal(flushed.length, 1);
+  const at = { text: flushed[0].indexOf("config file below:"), res: flushed[0].indexOf("📎 config.json") };
+  assert.ok(at.text >= 0 && at.res >= 0, "both parts present in one flush");
+  assert.ok(at.text < at.res, "text precedes resource in the same segment");
+  assert.match(flushed[0], /```json\n/);
+});
+
+test("resource name falls back to the full URI when there is no path segment", async () => {
+  const client = makeClient({});
+
+  await emitToolCallResource(client, { uri: "untitled:Untitled-1", text: "notes" });
+
+  const text = await client.flush();
+  assert.match(text, /📎 untitled:Untitled-1\n/);
+});
+
+test("resource fence language falls back to the file extension when MIME is absent", async () => {
+  const client = makeClient({});
+
+  await emitToolCallResource(client, { uri: "file:///src/main.ts", text: "export {};" });
+
+  const text = await client.flush();
+  assert.match(text, /📎 main\.ts\n/);
+  assert.match(text, /```typescript\n/);
+});
+
+test("oversized text resource truncates with an explicit tail inside the fence", async () => {
+  const client = makeClient({});
+
+  const body = "x".repeat(4000 + 1234);
+  await emitToolCallResource(client, { uri: "file:///big.txt", text: body });
+
+  const text = await client.flush();
+  assert.match(text, /\.\.\. \[truncated, 1234 more chars\]/);
+  const rendered = text.slice(text.indexOf("📎"));
+  assert.ok(rendered.length < 4600, "rendered block stays near one WeChat segment");
+});
+
+test("text resource containing triple backticks gets a longer fence", async () => {
+  const client = makeClient({});
+
+  await emitToolCallResource(client, {
+    uri: "file:///doc.md",
+    mimeType: "text/markdown",
+    text: "example:\n```js\ncode\n```\ndone",
+  });
+
+  const text = await client.flush();
+  assert.match(text, /````markdown\n/, "fence is longer than the inner backtick run");
+  const closingAt = text.lastIndexOf("````");
+  assert.ok(closingAt > text.indexOf("````markdown"), "closing fence matches");
+});
+
+test("image blob resource is delivered through the image pipeline exactly once", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///chart.png",
+    mimeType: "image/png",
+    blob: PNG_BASE64,
+  });
+
+  assert.equal(images.length, 1);
+  assert.equal(images[0].data, PNG_BASE64);
+  assert.equal(images[0].mimeType, "image/png");
+  assert.equal(client.hasProducedMessage, true);
+  assert.equal(await client.flush(), "", "no text residue for a delivered image blob");
+});
+
+test("non-image blob resource surfaces as a one-line placeholder", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  const blob = Buffer.from("binary-data-here").toString("base64");
+  await emitToolCallResource(client, {
+    uri: "file:///data.bin",
+    mimeType: "application/octet-stream",
+    blob,
+  });
+
+  assert.equal(images.length, 0, "binary blob must not hit the image sink");
+  const text = await client.flush();
+  assert.match(text, /📎 \[resource: data\.bin \(application\/octet-stream, ~\d+ bytes\) - binary content not rendered\]/);
+  assert.equal(client.hasProducedMessage, true);
+});
+
+test("blob resource without a MIME type reports unknown type in the placeholder", async () => {
+  const client = makeClient({});
+
+  await emitToolCallResource(client, { uri: "file:///mystery", blob: PNG_BASE64 });
+
+  const text = await client.flush();
+  assert.match(text, /📎 \[resource: mystery \(unknown type, ~\d+ bytes\) - binary content not rendered\]/);
+});
+
+test("showResources=false drops resources without rendering", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({
+    onImageFlush: async (img) => { images.push(img); },
+    showResources: false,
+  });
+  client.newTurn();
+
+  await emitToolCallResource(client, { uri: "file:///a.txt", text: "hello" });
+  await emitToolCallResource(client, { uri: "file:///b.png", mimeType: "image/png", blob: PNG_BASE64 });
+
+  assert.equal(images.length, 0);
+  assert.equal(client.hasProducedMessage, false);
+  assert.equal(await client.flush(), "", "no output for intentionally hidden resources");
+});
+
+test("empty text resource is skipped without rendering an empty fence", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallResource(client, { uri: "file:///empty.txt", text: "   \n" });
+
+  assert.equal(client.hasProducedMessage, false);
+  assert.equal(await client.flush(), "");
 });
 
 // ---------------------------------------------------------------------------

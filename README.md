@@ -105,6 +105,7 @@ Options:
 - `--hide-thoughts`: do not forward agent thinking to WeChat (default: forwarded)
 - `--show-diffs`: forward ACP file diffs to WeChat (default: hidden)
 - `--hide-images`: do not forward agent image output to WeChat (default: forwarded)
+- `--hide-resources`: do not forward agent embedded resources to WeChat (default: forwarded)
 - `inject --text <text>`: enqueue a local text message for the running daemon
 - `-V, --version`: print version and exit
 - `-h, --help`: show help

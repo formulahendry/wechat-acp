@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Render ACP embedded `resource` content blocks from the agent (in `agent_message_chunk` and completed `tool_call_update` content) instead of silently dropping them. Text resources render inline as a fenced code block with a `📎 <name> (<mimeType>)` header, in stream order with the surrounding narrative; the fence grows past any backtick run in the body, the language hint derives from the MIME type or file extension, and bodies above 4000 characters truncate with an explicit `... [truncated, N more chars]` tail. Blob resources with an `image/*` MIME type reuse the image delivery pipeline from 0.9.0 (allow-list, size cap, placeholders); other blobs surface as a one-line `📎 [resource: ...]` placeholder. Empty text resources are logged and skipped. Enabled by default; disable with `--hide-resources` or `agent.showResources: false`. Fixes #59.
 - Fix session notifications queued across a turn boundary delivering with the next turn's context. All per-turn mutable state (delivery callbacks, text/thought buffers, delivery flags) now lives in a turn-state object captured when a notification arrives, and the turn switch itself (`beginTurn`) runs as a task on the same serialized queue: stragglers from a failed `prompt()` deliver with their own turn's binding, a late notification queued behind the boundary writes into its own closed turn's state instead of the new turn's buffers, and residual undelivered buffers are discarded at the boundary instead of leaking into the new turn. Fixes #54.
 
 ## 0.9.0

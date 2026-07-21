@@ -64,6 +64,7 @@ export interface SessionManagerOpts {
   showThoughts: boolean;
   showDiffs?: boolean;
   showImages?: boolean;
+  showResources?: boolean;
   log: (msg: string) => void;
   onReply: (userId: string, contextToken: string, text: string) => Promise<void>;
   onReplyImage?: (userId: string, contextToken: string, image: AgentImage) => Promise<void>;
@@ -240,6 +241,7 @@ export class SessionManager {
       showThoughts: this.opts.showThoughts,
       showDiffs: this.opts.showDiffs ?? false,
       showImages: this.opts.showImages ?? true,
+      showResources: this.opts.showResources ?? true,
     });
 
     const agentInfo = await spawnAgent({
