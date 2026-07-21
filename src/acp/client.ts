@@ -163,7 +163,7 @@ function renderTextResource(name: string, mimeType: string | null | undefined, t
       text.slice(0, MAX_RESOURCE_TEXT_CHARS) +
       `\n... [truncated, ${text.length - MAX_RESOURCE_TEXT_CHARS} more chars]`;
   }
-  body = body.replace(/\n$/, "");
+  body = body.replace(/(\r\n|\n|\r)$/, "");
   const longestRun = body.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
   const fence = "`".repeat(Math.max(3, longestRun + 1));
   const lang = resourceFenceLanguage(name, mimeType);
@@ -605,10 +605,16 @@ export class WeChatAcpClient implements acp.Client {
     // Sanitized once here: the label feeds the placeholder, the logs, and
     // the value forwarded to the image pipeline.
     const mime = sanitizeInlineLabel(resource.mimeType ?? "");
-    if (mime.toLowerCase().startsWith("image/")) {
+    // Route only exactly deliverable image types (base type, parameters
+    // stripped) into the image pipeline. Its allow-list miss path is
+    // log-and-skip, which is fine for image content blocks but would
+    // silently drop a resource; anything else falls through to the
+    // visible placeholder below.
+    const baseMime = mime.split(";")[0].trim().toLowerCase();
+    if (SUPPORTED_IMAGE_MIME_TYPES.has(baseMime)) {
       // Route through the image pipeline so an image handed back as an
       // embedded resource behaves exactly like an image content block.
-      await this.maybeSendImage({ data: resource.blob, mimeType: mime }, turn);
+      await this.maybeSendImage({ data: resource.blob, mimeType: baseMime }, turn);
       return;
     }
 

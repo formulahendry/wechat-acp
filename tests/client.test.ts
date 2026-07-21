@@ -796,6 +796,49 @@ test("overlong resource name is capped in the header", async () => {
   assert.match(header, /\.\.\.$/);
 });
 
+test("image blob resource with MIME parameters is routed with the base type", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///chart.png",
+    mimeType: "image/PNG; charset=binary",
+    blob: PNG_BASE64,
+  });
+
+  assert.equal(images.length, 1, "parameterized image MIME still delivers as an image");
+  assert.equal(images[0].mimeType, "image/png");
+  assert.equal(await client.flush(), "", "no placeholder for a delivered image");
+});
+
+test("unsupported image blob resource falls back to the placeholder instead of vanishing", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///scan.tiff",
+    mimeType: "image/tiff",
+    blob: PNG_BASE64,
+  });
+
+  assert.equal(images.length, 0, "unsupported image type must not hit the image sink");
+  const text = await client.flush();
+  assert.match(text, /📎 \[resource: scan\.tiff \(image\/tiff, ~\d+ bytes\) - binary content not rendered\]/);
+});
+
+test("text resource ending with CRLF renders without a stray carriage return", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallResource(client, { uri: "file:///win.txt", text: "line1\r\nline2\r\n" });
+
+  const text = await client.flush();
+  assert.match(text, /line2\n```/, "closing fence sits directly after the last line");
+  assert.ok(!/\r\n```/.test(text), "no stray CR before the closing fence");
+});
+
 // ---------------------------------------------------------------------------
 // Cross-turn callback binding (issue 54)
 // ---------------------------------------------------------------------------
