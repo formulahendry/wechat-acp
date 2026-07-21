@@ -9,13 +9,14 @@ import type * as acp from "@agentclientprotocol/sdk";
 import crypto from "node:crypto";
 import { login, loadToken, type TokenData } from "./weixin/auth.js";
 import { startMonitor } from "./weixin/monitor.js";
-import { sendTextMessage, uploadImageMedia, sendImageItem, splitText } from "./weixin/send.js";
-import type { UploadedImageMedia } from "./weixin/send.js";
+import { sendTextMessage, uploadImageMedia, sendImageItem, uploadFileMedia, sendFileItem, splitText } from "./weixin/send.js";
+import type { UploadedImageMedia, UploadedFileMedia } from "./weixin/send.js";
 import { sendTyping, getConfig } from "./weixin/api.js";
 import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
 import { SessionManager } from "./acp/session.js";
-import type { AgentImage } from "./acp/client.js";
+import { AUDIO_MIME_EXTENSIONS } from "./acp/client.js";
+import type { AgentImage, AgentAudio } from "./acp/client.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
 import type { WeChatAcpConfig } from "./config.js";
 import { BRIDGE_COMMANDS, resolveCommandAliases, resolveCommandNames } from "./config.js";
@@ -135,10 +136,12 @@ export class WeChatAcpBridge {
       showThoughts: this.config.agent.showThoughts,
       showDiffs: this.config.agent.showDiffs ?? false,
       showImages: this.config.agent.showImages ?? true,
+      showAudio: this.config.agent.showAudio ?? true,
       showResources: this.config.agent.showResources ?? true,
       log: this.log,
       onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
       onReplyImage: (userId, contextToken, image) => this.sendImageReply(userId, contextToken, image),
+      onReplyAudio: (userId, contextToken, audio) => this.sendAudioReply(userId, contextToken, audio),
       sendTyping: (userId, contextToken) => this.sendTypingIndicator(userId, contextToken),
     });
     this.sessionManager.start();
@@ -750,6 +753,73 @@ export class WeChatAcpBridge {
     throw lastError instanceof Error
       ? lastError
       : new Error(`deliverImage: failed after ${SEGMENT_SEND_MAX_ATTEMPTS} attempts`);
+  }
+
+  private async sendAudioReply(userId: string, contextToken: string, audio: AgentAudio): Promise<void> {
+    // Ride the same per-user chain as text and image replies so an audio
+    // file cannot interleave with the segments of a concurrent reply.
+    const previous = this.sendChains.get(userId) ?? Promise.resolve();
+    const current = previous
+      .catch(() => {})
+      .then(() => this.deliverAudio(userId, contextToken, audio));
+    this.sendChains.set(
+      userId,
+      current.catch(() => {}),
+    );
+    return current;
+  }
+
+  private async deliverAudio(userId: string, contextToken: string, audio: AgentAudio): Promise<void> {
+    const buffer = Buffer.from(audio.data, "base64");
+    const startedAt = Date.now();
+    // Stable idempotency key and file name across attempts, same contract
+    // as deliverImage: together with reusing the uploaded media descriptor,
+    // every send attempt carries a byte-identical payload.
+    const clientId = `wechat-acp-${crypto.randomUUID()}`;
+    const mime = audio.mimeType.trim().toLowerCase();
+    const ext = Object.hasOwn(AUDIO_MIME_EXTENSIONS, mime) ? AUDIO_MIME_EXTENSIONS[mime] : "bin";
+    const fileName = `audio-${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
+    const sendOpts = {
+      baseUrl: this.tokenData!.baseUrl,
+      token: this.tokenData!.token,
+      contextToken,
+      cdnBaseUrl: this.config.wechat.cdnBaseUrl,
+    };
+    let media: UploadedFileMedia | null = null;
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
+      try {
+        // Upload once; only re-run if a previous attempt failed before the
+        // upload completed. A send-stage failure retries with the same media.
+        media ??= await uploadFileMedia(userId, buffer, sendOpts);
+        await this.paceConsecutiveSend(userId);
+        await sendFileItem(userId, media, fileName, sendOpts, clientId);
+        trackEvent(
+          "reply.audio.sent",
+          {
+            userIdHash: hashUserId(userId),
+            bytes: buffer.length,
+            mimeType: audio.mimeType,
+            durationMs: Date.now() - startedAt,
+          },
+          hashUserId(userId),
+        );
+        this.cancelTypingIndicator(userId, contextToken).catch(() => {});
+        return;
+      } catch (err) {
+        lastError = err;
+        trackException(err, "reply.audio", hashUserId(userId));
+        if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));
+        }
+      }
+    }
+
+    // Propagate so the ACP client appends its delivery-failure placeholder.
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`deliverAudio: failed after ${SEGMENT_SEND_MAX_ATTEMPTS} attempts`);
   }
 
   /**

@@ -78,6 +78,7 @@ Options:
   --hide-thoughts     Do not forward agent thinking to WeChat (default: forwarded)
   --show-diffs        Forward ACP file diffs to WeChat (default: hidden)
   --hide-images       Do not forward agent image output to WeChat (default: forwarded)
+  --hide-audio        Do not forward agent audio output to WeChat (default: forwarded)
   --hide-resources    Do not forward agent embedded resources to WeChat (default: forwarded)
   --text <text>       Message text for "inject"
   --file <path>       Read injected message text from a file
@@ -139,6 +140,7 @@ function parseArgs(argv: string[]): {
   hideThoughts: boolean;
   showDiffs: boolean;
   hideImages: boolean;
+  hideAudio: boolean;
   hideResources: boolean;
   verbose: boolean;
   version: boolean;
@@ -151,6 +153,7 @@ function parseArgs(argv: string[]): {
     hideThoughts: false,
     showDiffs: false,
     hideImages: false,
+    hideAudio: false,
     hideResources: false,
     verbose: false,
     version: false,
@@ -219,6 +222,9 @@ function parseArgs(argv: string[]): {
         break;
       case "--hide-images":
         result.hideImages = true;
+        break;
+      case "--hide-audio":
+        result.hideAudio = true;
         break;
       case "--hide-resources":
         result.hideResources = true;
@@ -504,6 +510,7 @@ async function main(): Promise<void> {
   if (args.hideThoughts) config.agent.showThoughts = false;
   if (args.showDiffs) config.agent.showDiffs = true;
   if (args.hideImages) config.agent.showImages = false;
+  if (args.hideAudio) config.agent.showAudio = false;
   if (args.hideResources) config.agent.showResources = false;
   config.daemon.enabled = args.daemon;
 

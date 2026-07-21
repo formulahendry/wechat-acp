@@ -9,7 +9,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { WeChatAcpClient, type AgentImage } from "../src/acp/client.js";
+import { WeChatAcpClient, type AgentImage, type AgentAudio } from "../src/acp/client.js";
 import { splitText } from "../src/weixin/send.js";
 
 // ---------------------------------------------------------------------------
@@ -21,7 +21,9 @@ function makeClient(opts: {
   onMessageFlush?: (text: string) => Promise<void>;
   onThoughtFlush?: (text: string) => Promise<void>;
   onImageFlush?: (image: AgentImage) => Promise<void>;
+  onAudioFlush?: (audio: AgentAudio) => Promise<void>;
   showImages?: boolean;
+  showAudio?: boolean;
   showResources?: boolean;
   sendDelay?: number;
   log?: (msg: string) => void;
@@ -42,9 +44,11 @@ function makeClient(opts: {
         if (sendDelay) await delay(sendDelay);
       }),
     onImageFlush: opts.onImageFlush,
+    onAudioFlush: opts.onAudioFlush,
     log: opts.log ?? (() => {}),
     showThoughts: false,
     showImages: opts.showImages,
+    showAudio: opts.showAudio,
     showResources: opts.showResources,
   });
 }
@@ -68,6 +72,30 @@ async function emitThoughtChunk(client: WeChatAcpClient, text = "thinking…"): 
 }
 
 const PNG_BASE64 = Buffer.from("fake-png-bytes").toString("base64");
+const MP3_BASE64 = Buffer.from("fake-mp3-bytes").toString("base64");
+
+async function emitToolCallAudio(
+  client: WeChatAcpClient,
+  audio: { data: string; mimeType: string },
+): Promise<void> {
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-audio-1",
+      status: "completed",
+      content: [{ type: "content", content: { type: "audio", ...audio } }],
+    },
+  } as never);
+}
+
+async function emitMessageChunkAudio(
+  client: WeChatAcpClient,
+  audio: { data: string; mimeType: string },
+): Promise<void> {
+  await client.sessionUpdate({
+    update: { sessionUpdate: "agent_message_chunk", content: { type: "audio", ...audio } },
+  } as never);
+}
 
 async function emitToolCallImage(
   client: WeChatAcpClient,
@@ -959,6 +987,146 @@ test("adversarial backtick run keeps the fence bounded and contained", async () 
   const fenceLines = text.split("\n").filter((l) => /^`{8}/.test(l));
   assert.equal(fenceLines.length, 2, "opening and closing fences present");
   assert.ok(text.length < 300, `render stays bounded, got ${text.length}`);
+});
+
+// ---------------------------------------------------------------------------
+// Audio content blocks (issue 58)
+// ---------------------------------------------------------------------------
+
+test("audio in completed tool_call_update is delivered exactly once with data intact", async () => {
+  const audios: AgentAudio[] = [];
+  const client = makeClient({ onAudioFlush: async (a) => { audios.push(a); } });
+  client.newTurn();
+
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "audio/mpeg" });
+
+  assert.equal(audios.length, 1);
+  assert.equal(audios[0].data, MP3_BASE64);
+  assert.equal(audios[0].mimeType, "audio/mpeg");
+  assert.equal(client.hasProducedMessage, true, "audio-only turn counts as produced output");
+});
+
+test("audio in agent_message_chunk is delivered", async () => {
+  const audios: AgentAudio[] = [];
+  const client = makeClient({ onAudioFlush: async (a) => { audios.push(a); } });
+
+  await emitMessageChunkAudio(client, { data: MP3_BASE64, mimeType: "audio/wav" });
+
+  assert.equal(audios.length, 1);
+  assert.equal(audios[0].mimeType, "audio/wav");
+});
+
+test("audio mimeType with surrounding whitespace is normalized and delivered", async () => {
+  const audios: AgentAudio[] = [];
+  const client = makeClient({ onAudioFlush: async (a) => { audios.push(a); } });
+
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "  audio/mpeg\n" });
+
+  assert.equal(audios.length, 1);
+  assert.equal(audios[0].mimeType, "audio/mpeg");
+});
+
+test("text before audio is flushed first so ordering is preserved", async () => {
+  const order: string[] = [];
+  const client = makeClient({
+    onMessageFlush: async (t) => { order.push(`text:${t}`); },
+    onAudioFlush: async () => { order.push("audio"); },
+  });
+
+  await emitMessageChunk(client, "here is the recording:");
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "audio/mpeg" });
+  await emitMessageChunk(client, "anything else?");
+  const tail = await client.flush();
+
+  assert.deepEqual(order, ["text:here is the recording:", "audio"]);
+  assert.equal(tail, "anything else?");
+});
+
+test("showAudio=false drops audio without calling the sink", async () => {
+  const audios: AgentAudio[] = [];
+  const client = makeClient({
+    onAudioFlush: async (a) => { audios.push(a); },
+    showAudio: false,
+  });
+  client.newTurn();
+
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "audio/mpeg" });
+
+  assert.equal(audios.length, 0);
+  assert.equal(client.hasProducedMessage, false);
+  assert.equal(await client.flush(), "", "no placeholder for intentionally hidden audio");
+});
+
+test("unsupported audio mime type is skipped silently", async () => {
+  const audios: AgentAudio[] = [];
+  const client = makeClient({ onAudioFlush: async (a) => { audios.push(a); } });
+
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "audio/midi" });
+
+  assert.equal(audios.length, 0);
+  assert.equal(await client.flush(), "");
+});
+
+test("prototype-chain mime keys do not pass the audio allow-list gate", async () => {
+  // `"toString" in AUDIO_MIME_EXTENSIONS` would be true via the prototype
+  // chain; the gate must use an own-property check.
+  const audios: AgentAudio[] = [];
+  const client = makeClient({ onAudioFlush: async (a) => { audios.push(a); } });
+
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "toString" });
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "constructor" });
+
+  assert.equal(audios.length, 0);
+  assert.equal(await client.flush(), "");
+});
+
+test("oversized audio is skipped with a placeholder instead of uploading", async () => {
+  const audios: AgentAudio[] = [];
+  const client = makeClient({ onAudioFlush: async (a) => { audios.push(a); } });
+
+  // ~27 MiB decoded > 25 MiB cap
+  const oversized = "A".repeat(36 * 1024 * 1024);
+  await emitToolCallAudio(client, { data: oversized, mimeType: "audio/mpeg" });
+
+  assert.equal(audios.length, 0);
+  const text = await client.flush();
+  assert.match(text, /audio too large/);
+});
+
+test("failed audio delivery appends a placeholder to the text stream", async () => {
+  const client = makeClient({
+    onAudioFlush: async () => { throw new Error("CDN upload failed"); },
+  });
+  client.newTurn();
+
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "audio/mpeg" });
+
+  const text = await client.flush();
+  assert.match(text, /audio could not be delivered/);
+  assert.equal(client.hasProducedMessage, true);
+});
+
+test("audio without a configured sink is skipped without throwing", async () => {
+  const client = makeClient({});
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "audio/mpeg" });
+  assert.equal(await client.flush(), "");
+});
+
+test("beginTurn rebinds the audio sink to the new turn's callbacks", async () => {
+  const firstTurn: AgentAudio[] = [];
+  const secondTurn: AgentAudio[] = [];
+  const client = makeClient({ onAudioFlush: async (a) => { firstTurn.push(a); } });
+
+  await client.beginTurn({
+    sendTyping: async () => {},
+    onThoughtFlush: async () => {},
+    onMessageFlush: async () => {},
+    onAudioFlush: async (a: AgentAudio) => { secondTurn.push(a); },
+  });
+  await emitToolCallAudio(client, { data: MP3_BASE64, mimeType: "audio/mpeg" });
+
+  assert.equal(firstTurn.length, 0, "old turn's sink must not receive the audio");
+  assert.equal(secondTurn.length, 1);
 });
 
 // ---------------------------------------------------------------------------

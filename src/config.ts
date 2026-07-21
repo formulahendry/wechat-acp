@@ -133,6 +133,12 @@ export interface WeChatAcpConfig {
      */
     showImages?: boolean;
     /**
+     * Deliver agent-produced ACP `audio` content blocks as WeChat file
+     * messages. Defaults to `true`; set to `false` (or pass
+     * `--hide-audio`) to drop them.
+     */
+    showAudio?: boolean;
+    /**
      * Render agent-produced ACP embedded `resource` content blocks in
      * WeChat: text resources inline as fenced code blocks, image blobs
      * through the image pipeline, other blobs as a one-line placeholder.
@@ -211,6 +217,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       showThoughts: true,
       showDiffs: false,
       showImages: true,
+      showAudio: true,
       showResources: true,
     },
     agents: { ...BUILT_IN_AGENTS },

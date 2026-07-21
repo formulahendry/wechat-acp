@@ -7,7 +7,7 @@
 
 import type { ChildProcess } from "node:child_process";
 import type * as acp from "@agentclientprotocol/sdk";
-import { WeChatAcpClient, type AgentImage } from "./client.js";
+import { WeChatAcpClient, type AgentImage, type AgentAudio } from "./client.js";
 import { spawnAgent, killAgent, type AgentProcessInfo } from "./agent-manager.js";
 import { trackEvent, trackException, hashUserId } from "../telemetry/index.js";
 
@@ -64,10 +64,12 @@ export interface SessionManagerOpts {
   showThoughts: boolean;
   showDiffs?: boolean;
   showImages?: boolean;
+  showAudio?: boolean;
   showResources?: boolean;
   log: (msg: string) => void;
   onReply: (userId: string, contextToken: string, text: string) => Promise<void>;
   onReplyImage?: (userId: string, contextToken: string, image: AgentImage) => Promise<void>;
+  onReplyAudio?: (userId: string, contextToken: string, audio: AgentAudio) => Promise<void>;
   sendTyping: (userId: string, contextToken: string) => Promise<void>;
 }
 
@@ -231,6 +233,9 @@ export class SessionManager {
       ...(this.opts.onReplyImage
         ? { onImageFlush: (image: AgentImage) => this.opts.onReplyImage!(userId, contextToken, image) }
         : {}),
+      ...(this.opts.onReplyAudio
+        ? { onAudioFlush: (audio: AgentAudio) => this.opts.onReplyAudio!(userId, contextToken, audio) }
+        : {}),
       onConfigOptionsUpdate: (configOptions) => {
         const session = this.sessions.get(userId);
         if (!session || session.client !== client) return;
@@ -241,6 +246,7 @@ export class SessionManager {
       showThoughts: this.opts.showThoughts,
       showDiffs: this.opts.showDiffs ?? false,
       showImages: this.opts.showImages ?? true,
+      showAudio: this.opts.showAudio ?? true,
       showResources: this.opts.showResources ?? true,
     });
 
@@ -306,6 +312,12 @@ export class SessionManager {
             ? {
                 onImageFlush: (image: AgentImage) =>
                   this.opts.onReplyImage!(session.userId, pending.contextToken, image),
+              }
+            : {}),
+          ...(this.opts.onReplyAudio
+            ? {
+                onAudioFlush: (audio: AgentAudio) =>
+                  this.opts.onReplyAudio!(session.userId, pending.contextToken, audio),
               }
             : {}),
         });
