@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix session notifications queued across a turn boundary delivering with the next turn's context. All per-turn mutable state (delivery callbacks, text/thought buffers, delivery flags) now lives in a turn-state object captured when a notification arrives, and the turn switch itself (`beginTurn`) runs as a task on the same serialized queue: stragglers from a failed `prompt()` deliver with their own turn's binding, a late notification queued behind the boundary writes into its own closed turn's state instead of the new turn's buffers, and residual undelivered buffers are discarded at the boundary instead of leaking into the new turn. Fixes #54.
+
 ## 0.9.0
 
 - Render ACP `image` content blocks from the agent (in `agent_message_chunk` and completed `tool_call_update` content) as native WeChat image messages, instead of silently dropping them. Images are uploaded to the WeChat CDN (AES-128-ECB, `getuploadurl` + `sendmessage` with an `image_item`) and delivered in stream order relative to surrounding text: all session notifications are handled on a serialized per-client task queue, and outbound sends ride the per-user reply queue. Supported types: png, jpeg, gif, webp, bmp. Unsupported MIME types are skipped with a log line; an image above 10 MiB surfaces as an `[image too large to deliver]` placeholder in the text reply, and a failed delivery as `[image could not be delivered]`. Enabled by default; disable with `--hide-images` or `agent.showImages: false`. Adds one telemetry event: `reply.image.sent`. Fixes #52.
