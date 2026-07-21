@@ -107,7 +107,10 @@ function sanitizeInlineLabel(value: string): string {
     .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return collapsed.length > MAX_LABEL_CHARS ? `${collapsed.slice(0, MAX_LABEL_CHARS)}...` : collapsed;
+  // Cap includes the ellipsis so the documented bound holds exactly.
+  return collapsed.length > MAX_LABEL_CHARS
+    ? `${collapsed.slice(0, MAX_LABEL_CHARS - 3)}...`
+    : collapsed;
 }
 
 /**

@@ -660,6 +660,11 @@ test("oversized resource with long name and MIME still fits one segment", async 
   const text = await client.flush();
   assert.ok(text.length <= 4000, `worst-case overhead stays in budget (got ${text.length})`);
   assert.equal(splitText(text, 4000).length, 1, "block is never split across messages");
+  const header = text.split("\n").find((l) => l.includes("📎"));
+  const labels = header?.match(/^📎 (.+) \((.+)\)$/);
+  assert.ok(labels, "header carries name and MIME note");
+  assert.ok(labels[1].length <= 120, `name label capped including ellipsis (got ${labels[1].length})`);
+  assert.ok(labels[2].length <= 120, `mime label capped including ellipsis (got ${labels[2].length})`);
 });
 
 test("text resource containing triple backticks gets a longer fence", async () => {
