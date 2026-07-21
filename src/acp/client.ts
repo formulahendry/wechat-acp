@@ -90,10 +90,30 @@ const RESOURCE_EXT_LANGUAGES: Readonly<Record<string, string>> = {
   ini: "ini",
 };
 
+/** Cap on sanitized inline labels so a crafted URI cannot flood a header line. */
+const MAX_LABEL_CHARS = 120;
+
+/**
+ * Collapse agent-controlled label text (resource names, MIME notes) to one
+ * safe line before it is interpolated into `📎` headers, placeholders, or
+ * logs. URIs percent-decode and MIME types arrive raw off the wire, so
+ * either can carry newlines or control characters that would break the
+ * one-line format and inject extra lines into the chat transcript.
+ */
+function sanitizeInlineLabel(value: string): string {
+  const collapsed = value
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return collapsed.length > MAX_LABEL_CHARS ? `${collapsed.slice(0, MAX_LABEL_CHARS)}...` : collapsed;
+}
+
 /**
  * Human-readable name for a resource: the last path segment of its URI,
- * percent-decoded. Falls back to the full URI when there is no useful
- * segment (e.g. `untitled:Untitled-1`, a bare scheme, or an empty URI).
+ * percent-decoded and sanitized to a single line. Falls back to the full
+ * URI when there is no useful segment (e.g. `untitled:Untitled-1`, a bare
+ * scheme, or an empty URI), and to `resource` when nothing printable
+ * survives sanitization.
  */
 function resourceDisplayName(uri: string): string {
   const trimmed = uri.trim();
@@ -101,13 +121,18 @@ function resourceDisplayName(uri: string): string {
   const stripped = trimmed.replace(/[?#].*$/, "");
   const segments = stripped.split("/").filter((s) => s.length > 0);
   const last = segments[segments.length - 1] ?? "";
+  let name: string;
   // A lone scheme-bearing segment is not a useful name.
-  if (!last || (segments.length === 1 && last.includes(":"))) return trimmed;
-  try {
-    return decodeURIComponent(last);
-  } catch {
-    return last;
+  if (!last || (segments.length === 1 && last.includes(":"))) {
+    name = trimmed;
+  } else {
+    try {
+      name = decodeURIComponent(last);
+    } catch {
+      name = last;
+    }
   }
+  return sanitizeInlineLabel(name) || "resource";
 }
 
 function resourceFenceLanguage(name: string, mimeType?: string | null): string {
@@ -142,7 +167,7 @@ function renderTextResource(name: string, mimeType: string | null | undefined, t
   const longestRun = body.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 0) ?? 0;
   const fence = "`".repeat(Math.max(3, longestRun + 1));
   const lang = resourceFenceLanguage(name, mimeType);
-  const mime = mimeType?.trim();
+  const mime = mimeType ? sanitizeInlineLabel(mimeType) : "";
   const mimeNote = mime ? ` (${mime})` : "";
   return `\n📎 ${name}${mimeNote}\n${fence}${lang}\n${body}\n${fence}\n`;
 }
@@ -577,7 +602,9 @@ export class WeChatAcpClient implements acp.Client {
       return;
     }
 
-    const mime = resource.mimeType?.trim() ?? "";
+    // Sanitized once here: the label feeds the placeholder, the logs, and
+    // the value forwarded to the image pipeline.
+    const mime = sanitizeInlineLabel(resource.mimeType ?? "");
     if (mime.toLowerCase().startsWith("image/")) {
       // Route through the image pipeline so an image handed back as an
       // embedded resource behaves exactly like an image content block.

@@ -731,6 +731,71 @@ test("empty text resource is skipped without rendering an empty fence", async ()
   assert.equal(await client.flush(), "");
 });
 
+test("resource name with encoded newlines and control chars stays a single line", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  // %0A / %0D decode to LF / CR; %1B is ESC. None may survive into the header.
+  await emitToolCallResource(client, {
+    uri: "file:///tmp/evil%0Ainjected%0D%1Bline.txt",
+    text: "payload",
+  });
+
+  const text = await client.flush();
+  const header = text.split("\n").find((l) => l.startsWith("📎 "));
+  assert.ok(header, "header line present");
+  assert.match(header, /📎 evil injected line\.txt/);
+  assert.ok(!text.includes("\u001b"), "no escape chars in the rendered output");
+});
+
+test("mime type with newlines is sanitized in the text-resource header", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///notes.txt",
+    mimeType: "text/plain\nFAKE: injected",
+    text: "hello",
+  });
+
+  const text = await client.flush();
+  assert.match(text, /📎 notes\.txt \(text\/plain FAKE: injected\)\n/);
+});
+
+test("mime type with newlines is sanitized in the blob placeholder", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  const blob = Buffer.from("bytes").toString("base64");
+  await emitToolCallResource(client, {
+    uri: "file:///data.bin",
+    mimeType: "application/x-thing\r\nFAKE: injected",
+    blob,
+  });
+
+  assert.equal(images.length, 0);
+  const text = await client.flush();
+  assert.match(
+    text,
+    /📎 \[resource: data\.bin \(application\/x-thing FAKE: injected, ~\d+ bytes\) - binary content not rendered\]/,
+  );
+});
+
+test("overlong resource name is capped in the header", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  const longName = "a".repeat(400) + ".txt";
+  await emitToolCallResource(client, { uri: `file:///tmp/${longName}`, text: "body" });
+
+  const text = await client.flush();
+  const header = text.split("\n").find((l) => l.startsWith("📎 "));
+  assert.ok(header, "header line present");
+  assert.ok(header.length < 200, `header stays bounded, got ${header.length}`);
+  assert.match(header, /\.\.\.$/);
+});
+
 // ---------------------------------------------------------------------------
 // Cross-turn callback binding (issue 54)
 // ---------------------------------------------------------------------------
