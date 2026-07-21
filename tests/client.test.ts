@@ -543,3 +543,96 @@ test("failure placeholder keeps stream position when text arrives during the ima
   assert.ok(textAt >= 0, "later text must be preserved");
   assert.ok(placeholderAt < textAt, `placeholder must precede later text, got: ${JSON.stringify(text)}`);
 });
+
+// ---------------------------------------------------------------------------
+// Cross-turn callback binding (issue 54)
+// ---------------------------------------------------------------------------
+
+function turnCallbacks(sinks: {
+  messages?: string[];
+  images?: AgentImage[];
+  onImageFlush?: (img: AgentImage) => Promise<void>;
+}) {
+  return {
+    sendTyping: async () => {},
+    onThoughtFlush: async () => {},
+    onMessageFlush: async (t: string) => {
+      sinks.messages?.push(t);
+    },
+    onImageFlush:
+      sinks.onImageFlush ??
+      (async (img: AgentImage) => {
+        sinks.images?.push(img);
+      }),
+  };
+}
+
+test("notification queued across a turn boundary delivers with its own turn's callbacks", async () => {
+  /**
+   * Regression for issue 54: a failed prompt() leaves notification tasks
+   * queued; the old code rebound callbacks via plain mutation, so a queued
+   * image task delivered into the NEXT turn's context token. Now
+   * sessionUpdate captures the callbacks at arrival time and beginTurn's
+   * swap is itself a queued task, so the straggler lands in turn 1's sink.
+   */
+  const turn1Images: AgentImage[] = [];
+  const turn2Images: AgentImage[] = [];
+  let releaseImage!: () => void;
+
+  const client = makeClient({});
+  await client.beginTurn(
+    turnCallbacks({
+      onImageFlush: async (img) => {
+        await new Promise<void>((r) => { releaseImage = r; });
+        turn1Images.push(img);
+      },
+    }),
+  );
+
+  // Straggler notification from turn 1; prompt() has already rejected, so
+  // the session loop advances to turn 2 without draining the queue.
+  const straggler = emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
+
+  // Turn 2 rebinding queues up behind the straggler.
+  const turn2 = client.beginTurn(turnCallbacks({ images: turn2Images }));
+
+  await new Promise((r) => setTimeout(r, 10));
+  releaseImage();
+  await Promise.all([straggler, turn2]);
+
+  assert.equal(turn1Images.length, 1, "straggler image must deliver to its own turn's sink");
+  assert.equal(turn2Images.length, 0, "next turn's sink must not receive the previous turn's image");
+});
+
+test("text flushed by a straggler boundary event goes to its own turn's sink", async () => {
+  const turn1Messages: string[] = [];
+  const turn2Messages: string[] = [];
+
+  const client = makeClient({});
+  await client.beginTurn(turnCallbacks({ messages: turn1Messages }));
+
+  // Turn 1 buffers text; the boundary event that flushes it is still queued
+  // when turn 2 begins.
+  await emitMessageChunk(client, "turn-1 status");
+  const straggler = emitToolCall(client);
+  const turn2 = client.beginTurn(turnCallbacks({ messages: turn2Messages }));
+  await Promise.all([straggler, turn2]);
+
+  assert.deepEqual(turn1Messages, ["turn-1 status"], "flush must use turn 1's binding");
+  assert.deepEqual(turn2Messages, [], "turn 2 must not receive turn 1's text");
+});
+
+test("beginTurn discards residual undelivered text instead of leaking it into the new turn", async () => {
+  const client = makeClient({});
+  await client.beginTurn(turnCallbacks({}));
+
+  // Turn 1 buffers text but no boundary event flushes it and no final
+  // flush() runs (the failed-prompt path).
+  await emitMessageChunk(client, "undelivered turn-1 text");
+
+  await client.beginTurn(turnCallbacks({}));
+
+  const text = await client.flush();
+  assert.equal(text, "", "turn-1 residue must not surface in turn 2's flush");
+  assert.equal(client.hasProducedMessage, false, "beginTurn must reset per-turn state");
+});

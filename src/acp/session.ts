@@ -290,8 +290,13 @@ export class SessionManager {
         const pending = session.queue.shift()!;
         let completionError: unknown;
 
-        // Keep the ACP client instance stable because the connection is bound to it.
-        session.client.updateCallbacks({
+        // Keep the ACP client instance stable because the connection is bound
+        // to it. beginTurn runs on the client's notification queue: every task
+        // from the previous turn (including ones left queued when a failed
+        // prompt() rejected early) delivers with its own turn's callbacks
+        // before the swap, and residual undelivered buffers are discarded at
+        // the boundary instead of leaking into this turn (issue 54).
+        await session.client.beginTurn({
           sendTyping: () => this.opts.sendTyping(session.userId, pending.contextToken),
           onThoughtFlush: (text) => this.opts.onReply(session.userId, pending.contextToken, text),
           onMessageFlush: (text) => this.opts.onReply(session.userId, pending.contextToken, text),
@@ -302,10 +307,6 @@ export class SessionManager {
               }
             : {}),
         });
-
-        // Reset chunks for the new turn
-        await session.client.flush();
-        session.client.newTurn();
 
         const promptStartedAt = Date.now();
         try {
