@@ -28,10 +28,13 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.16.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "applicationinsights": "^2.9.6",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^22.0.0",
     "tsx": "^4.22.3",
     "typescript": "^5.5.0"

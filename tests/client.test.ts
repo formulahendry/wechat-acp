@@ -9,7 +9,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { WeChatAcpClient, type AgentImage, type AgentAudio } from "../src/acp/client.js";
+import {
+  WeChatAcpClient,
+  type AgentImage,
+  type AgentAudio,
+  type AgentFile,
+} from "../src/acp/client.js";
+import type { AgentResourceLink } from "../src/artifacts/types.js";
 import { splitText } from "../src/weixin/send.js";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +28,8 @@ function makeClient(opts: {
   onThoughtFlush?: (text: string) => Promise<void>;
   onImageFlush?: (image: AgentImage) => Promise<void>;
   onAudioFlush?: (audio: AgentAudio) => Promise<void>;
+  onFileFlush?: (file: AgentFile) => Promise<void>;
+  resolveResourceLink?: (link: AgentResourceLink) => Promise<AgentFile | null>;
   showImages?: boolean;
   showAudio?: boolean;
   showResources?: boolean;
@@ -45,6 +53,8 @@ function makeClient(opts: {
       }),
     onImageFlush: opts.onImageFlush,
     onAudioFlush: opts.onAudioFlush,
+    onFileFlush: opts.onFileFlush,
+    resolveResourceLink: opts.resolveResourceLink,
     log: opts.log ?? (() => {}),
     showThoughts: false,
     showImages: opts.showImages,
@@ -808,6 +818,171 @@ test("blob resource without a MIME type reports unknown type in the placeholder"
   assert.match(text, /📎 \[resource: mystery \(unknown type, ~\d+ bytes\) - binary content not rendered\]/);
 });
 
+test("non-image blob resource is delivered through the generic file pipeline", async () => {
+  const files: AgentFile[] = [];
+  const blob = Buffer.from("binary-data-here").toString("base64");
+  const client = makeClient({
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await emitToolCallResource(client, {
+    uri: "file:///report.pdf",
+    mimeType: "application/pdf",
+    blob,
+  });
+
+  assert.deepEqual(files, [
+    { data: blob, name: "report.pdf", mimeType: "application/pdf" },
+  ]);
+  assert.equal(await client.flush(), "");
+  assert.equal(client.hasProducedMessage, true);
+});
+
+test("resource_link in agent_message_chunk resolves and delivers a file", async () => {
+  const files: AgentFile[] = [];
+  const seen: AgentResourceLink[] = [];
+  const client = makeClient({
+    resolveResourceLink: async (link) => {
+      seen.push(link);
+      return {
+        data: Buffer.from("attachment").toString("base64"),
+        name: "result.zip",
+        mimeType: "application/zip",
+      };
+    },
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "resource_link",
+        uri: "wechat-acp://artifact/123",
+        name: "result.zip",
+        mimeType: "application/zip",
+      },
+    },
+  } as never);
+
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].uri, "wechat-acp://artifact/123");
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "result.zip");
+});
+
+test("completed tool_call resource_link is delivered for Codex-style output", async () => {
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    resolveResourceLink: async () => ({
+      data: Buffer.from("codex-file").toString("base64"),
+      name: "codex.txt",
+      mimeType: "text/plain",
+    }),
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-codex-link",
+      title: "Create file",
+      status: "completed",
+      content: [
+        {
+          type: "content",
+          content: {
+            type: "resource_link",
+            uri: "file:///workspace/codex.txt",
+            name: "codex.txt",
+          },
+        },
+      ],
+    },
+  } as never);
+
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "codex.txt");
+});
+
+test("resource_link in tool_call_update preserves text-before-file ordering", async () => {
+  const order: string[] = [];
+  const client = makeClient({
+    onMessageFlush: async (text) => {
+      order.push(`text:${text}`);
+    },
+    resolveResourceLink: async () => ({
+      data: Buffer.from("file").toString("base64"),
+      name: "output.txt",
+      mimeType: "text/plain",
+    }),
+    onFileFlush: async (file) => {
+      order.push(`file:${file.name}`);
+    },
+  });
+  await emitMessageChunk(client, "before");
+
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-link",
+      status: "completed",
+      content: [
+        {
+          type: "content",
+          content: {
+            type: "resource_link",
+            uri: "wechat-acp://artifact/output",
+            name: "output.txt",
+          },
+        },
+      ],
+    },
+  } as never);
+
+  assert.deepEqual(order, ["text:before", "file:output.txt"]);
+});
+
+test("showResources=false does not resolve or deliver resource links", async () => {
+  let resolverCalls = 0;
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    showResources: false,
+    resolveResourceLink: async () => {
+      resolverCalls++;
+      return {
+        data: Buffer.from("hidden").toString("base64"),
+        name: "hidden.txt",
+        mimeType: "text/plain",
+      };
+    },
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "resource_link",
+        uri: "wechat-acp://artifact/hidden",
+        name: "hidden.txt",
+      },
+    },
+  } as never);
+
+  assert.equal(resolverCalls, 0);
+  assert.equal(files.length, 0);
+  assert.equal(await client.flush(), "");
+});
+
 test("showResources=false drops resources without rendering", async () => {
   const images: AgentImage[] = [];
   const client = makeClient({
@@ -1160,6 +1335,34 @@ test("beginTurn rebinds the audio sink to the new turn's callbacks", async () =>
   assert.equal(secondTurn.length, 1);
 });
 
+test("beginTurn rebinds the file sink to the new turn's callbacks", async () => {
+  const firstTurn: AgentFile[] = [];
+  const secondTurn: AgentFile[] = [];
+  const client = makeClient({
+    onFileFlush: async (file) => {
+      firstTurn.push(file);
+    },
+  });
+
+  await client.beginTurn({
+    sendTyping: async () => {},
+    onThoughtFlush: async () => {},
+    onMessageFlush: async () => {},
+    onFileFlush: async (file) => {
+      secondTurn.push(file);
+    },
+  });
+  await emitToolCallResource(client, {
+    uri: "file:///result.bin",
+    mimeType: "application/octet-stream",
+    blob: Buffer.from("result").toString("base64"),
+  });
+
+  assert.equal(firstTurn.length, 0);
+  assert.equal(secondTurn.length, 1);
+  assert.equal(secondTurn[0].name, "result.bin");
+});
+
 // ---------------------------------------------------------------------------
 // Cross-turn callback binding (issue 54)
 // ---------------------------------------------------------------------------
@@ -1301,6 +1504,71 @@ test("late old-turn notification queued after beginTurn cannot leak into the new
 // ---------------------------------------------------------------------------
 
 const BLOB_BASE64 = Buffer.from("COPILOT_RESOURCE_SENTINEL").toString("base64");
+
+test("Copilot CLI rawOutput resource_link resolves and delivers a file", async () => {
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    resolveResourceLink: async (link) => ({
+      data: Buffer.from(`resolved:${link.uri}`).toString("base64"),
+      name: link.name ?? "artifact.txt",
+      mimeType: link.mimeType ?? "application/octet-stream",
+    }),
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await emitToolCallRawOutputImage(
+    client,
+    {
+      content: "",
+      detailedContent: "",
+      contents: [
+        {
+          type: "resource_link",
+          uri: "file:///workspace/artifact.txt",
+          name: "artifact.txt",
+          description: "Copilot ACP resource-link probe artifact",
+          mimeType: "text/plain",
+          size: 31,
+        },
+      ],
+    },
+    [{ type: "content", content: { type: "text", text: "" } }],
+  );
+
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "artifact.txt");
+  assert.equal(files[0].mimeType, "text/plain");
+});
+
+test("standard resource_link suppresses the mirrored rawOutput link", async () => {
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    resolveResourceLink: async (link) => ({
+      data: Buffer.from("one-file").toString("base64"),
+      name: link.name ?? "artifact.txt",
+      mimeType: "text/plain",
+    }),
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  const link = {
+    type: "resource_link",
+    uri: "wechat-acp://artifact/duplicate",
+    name: "artifact.txt",
+    mimeType: "text/plain",
+  };
+  await emitToolCallRawOutputImage(
+    client,
+    { contents: [link] },
+    [{ type: "content", content: link }],
+  );
+
+  assert.equal(files.length, 1, "the standard and rawOutput copies must deliver once");
+});
 
 test("Copilot CLI shape: resource only in rawOutput renders exactly once", async () => {
   // Exact captured payload shape from Copilot CLI 1.0.73: an empty text

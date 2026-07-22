@@ -16,7 +16,12 @@ import { TypingStatus, MessageType } from "./weixin/types.js";
 import type { WeixinMessage } from "./weixin/types.js";
 import { SessionManager } from "./acp/session.js";
 import { AUDIO_MIME_EXTENSIONS } from "./acp/client.js";
-import type { AgentImage, AgentAudio } from "./acp/client.js";
+import type { AgentImage, AgentAudio, AgentFile } from "./acp/client.js";
+import {
+  startArtifactMcpServer,
+  type ArtifactMcpServer,
+} from "./artifacts/server.js";
+import { sanitizeFileName } from "./artifacts/store.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
 import type { WeChatAcpConfig } from "./config.js";
 import { BRIDGE_COMMANDS, resolveCommandAliases, resolveCommandNames } from "./config.js";
@@ -48,6 +53,7 @@ export class WeChatAcpBridge {
   private config: WeChatAcpConfig;
   private abortController = new AbortController();
   private sessionManager: SessionManager | null = null;
+  private artifactMcpServer: ArtifactMcpServer | null = null;
   private injectionMonitor: InjectionMonitor | null = null;
   private tokenData: TokenData | null = null;
   private stateUpdate = Promise.resolve();
@@ -123,60 +129,109 @@ export class WeChatAcpBridge {
       this.log(`Use --login to force re-login`);
     }
 
-    // 2. Create SessionManager
-    this.sessionManager = new SessionManager({
-      agentCommand: this.config.agent.command,
-      agentArgs: this.config.agent.args,
-      agentCwd: this.config.agent.cwd,
-      agentEnv: this.config.agent.env,
-      agentPreset: this.config.agent.preset ?? "raw",
-      idleTimeoutMs: this.config.session.idleTimeoutMs,
-      maxConcurrentUsers: this.config.session.maxConcurrentUsers,
-      showThoughts: this.config.agent.showThoughts,
-      showDiffs: this.config.agent.showDiffs ?? false,
-      showImages: this.config.agent.showImages ?? true,
-      showAudio: this.config.agent.showAudio ?? true,
-      showResources: this.config.agent.showResources ?? true,
-      log: this.log,
-      onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
-      onReplyImage: (userId, contextToken, image) => this.sendImageReply(userId, contextToken, image),
-      onReplyAudio: (userId, contextToken, audio) => this.sendAudioReply(userId, contextToken, audio),
-      sendTyping: (userId, contextToken) => this.sendTypingIndicator(userId, contextToken),
-    });
-    this.sessionManager.start();
-
-    if (this.config.storage.injectDir && this.config.storage.stateFile) {
-      this.injectionMonitor = new InjectionMonitor({
-        injectDir: this.config.storage.injectDir,
+    try {
+      // 2. Start the local artifact MCP server and create SessionManager
+      if (this.config.agent.showResources ?? true) {
+        try {
+          this.artifactMcpServer = await startArtifactMcpServer({
+            rootDir: this.config.agent.cwd,
+            log: this.log,
+          });
+        } catch (err) {
+          this.log(`Artifact MCP unavailable; agent file attachments disabled: ${String(err)}`);
+          trackException(err, "artifact_mcp");
+        }
+      }
+      this.sessionManager = new SessionManager({
+        agentCommand: this.config.agent.command,
+        agentArgs: this.config.agent.args,
+        agentCwd: this.config.agent.cwd,
+        agentEnv: this.config.agent.env,
+        agentPreset: this.config.agent.preset ?? "raw",
+        idleTimeoutMs: this.config.session.idleTimeoutMs,
+        maxConcurrentUsers: this.config.session.maxConcurrentUsers,
+        showThoughts: this.config.agent.showThoughts,
+        showDiffs: this.config.agent.showDiffs ?? false,
+        showImages: this.config.agent.showImages ?? true,
+        showAudio: this.config.agent.showAudio ?? true,
+        showResources: this.config.agent.showResources ?? true,
+        createMcpLease: this.artifactMcpServer
+          ? () => this.artifactMcpServer!.createLease()
+          : undefined,
         log: this.log,
-        onMessage: (job) => this.enqueueInjectedMessage(job),
+        onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
+        onReplyImage: (userId, contextToken, image) => this.sendImageReply(userId, contextToken, image),
+        onReplyAudio: (userId, contextToken, audio) => this.sendAudioReply(userId, contextToken, audio),
+        onReplyFile: (userId, contextToken, file) => this.sendFileReply(userId, contextToken, file),
+        resolveResourceLink: this.artifactMcpServer
+          ? (link) => this.artifactMcpServer!.resolveResourceLink(link)
+          : undefined,
+        sendTyping: (userId, contextToken) => this.sendTypingIndicator(userId, contextToken),
       });
-      await this.injectionMonitor.start();
-      this.log(`Injection queue: ${this.config.storage.injectDir}`);
-    }
+      this.sessionManager.start();
 
-    // 3. Start monitor loop
-    this.log("Starting message polling...");
-    await startMonitor({
-      baseUrl: this.tokenData.baseUrl,
-      token: this.tokenData.token,
-      storageDir: this.config.storage.dir,
-      abortSignal: this.abortController.signal,
-      log: this.log,
-      onMessage: (msg) => this.handleMessage(msg),
-    });
+      if (this.config.storage.injectDir && this.config.storage.stateFile) {
+        this.injectionMonitor = new InjectionMonitor({
+          injectDir: this.config.storage.injectDir,
+          log: this.log,
+          onMessage: (job) => this.enqueueInjectedMessage(job),
+        });
+        await this.injectionMonitor.start();
+        this.log(`Injection queue: ${this.config.storage.injectDir}`);
+      }
+
+      // 3. Start monitor loop
+      this.log("Starting message polling...");
+      await startMonitor({
+        baseUrl: this.tokenData.baseUrl,
+        token: this.tokenData.token,
+        storageDir: this.config.storage.dir,
+        abortSignal: this.abortController.signal,
+        log: this.log,
+        onMessage: (msg) => this.handleMessage(msg),
+      });
+    } catch (err) {
+      try {
+        await this.stop();
+      } catch (cleanupErr) {
+        throw new AggregateError(
+          [err, cleanupErr],
+          "Bridge startup failed and cleanup also failed",
+        );
+      }
+      throw err;
+    }
   }
 
   async stop(): Promise<void> {
     this.log("Stopping bridge...");
     this.abortController.abort();
-    await this.injectionMonitor?.stop();
-    await this.sessionManager?.stop();
+    const cleanupErrors: unknown[] = [];
+    try {
+      await this.injectionMonitor?.stop();
+    } catch (err) {
+      cleanupErrors.push(err);
+    }
+    try {
+      await this.sessionManager?.stop();
+    } catch (err) {
+      cleanupErrors.push(err);
+    }
+    try {
+      await this.artifactMcpServer?.close();
+    } catch (err) {
+      cleanupErrors.push(err);
+    } finally {
+      this.artifactMcpServer = null;
+    }
     await this.stateUpdate.catch((err) => {
       this.log(`Failed to flush state before stop: ${String(err)}`);
       trackException(sanitizeStateError(err), "state");
     });
     this.log("Bridge stopped");
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(cleanupErrors, "Bridge cleanup failed");
+    }
   }
 
   private handleMessage(msg: WeixinMessage): void {
@@ -755,12 +810,37 @@ export class WeChatAcpBridge {
   }
 
   private async sendAudioReply(userId: string, contextToken: string, audio: AgentAudio): Promise<void> {
-    // Ride the same per-user chain as text and image replies so an audio
-    // file cannot interleave with the segments of a concurrent reply.
+    const mime = audio.mimeType.trim().toLowerCase();
+    const ext = Object.hasOwn(AUDIO_MIME_EXTENSIONS, mime) ? AUDIO_MIME_EXTENSIONS[mime] : "bin";
+    const fileName = `audio-${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
+    return this.queueFileReply(
+      userId,
+      contextToken,
+      { data: audio.data, name: fileName, mimeType: audio.mimeType },
+      "audio",
+    );
+  }
+
+  private async sendFileReply(
+    userId: string,
+    contextToken: string,
+    file: AgentFile,
+  ): Promise<void> {
+    return this.queueFileReply(userId, contextToken, file, "file");
+  }
+
+  private async queueFileReply(
+    userId: string,
+    contextToken: string,
+    file: AgentFile,
+    telemetryKind: "audio" | "file",
+  ): Promise<void> {
+    // Ride the same per-user chain as text and image replies so a file cannot
+    // interleave with the segments of a concurrent reply.
     const previous = this.sendChains.get(userId) ?? Promise.resolve();
     const current = previous
       .catch(() => {})
-      .then(() => this.deliverAudio(userId, contextToken, audio));
+      .then(() => this.deliverFile(userId, contextToken, file, telemetryKind));
     this.sendChains.set(
       userId,
       current.catch(() => {}),
@@ -768,16 +848,18 @@ export class WeChatAcpBridge {
     return current;
   }
 
-  private async deliverAudio(userId: string, contextToken: string, audio: AgentAudio): Promise<void> {
-    const buffer = Buffer.from(audio.data, "base64");
+  private async deliverFile(
+    userId: string,
+    contextToken: string,
+    file: AgentFile,
+    telemetryKind: "audio" | "file",
+  ): Promise<void> {
+    const buffer = Buffer.from(file.data, "base64");
     const startedAt = Date.now();
-    // Stable idempotency key and file name across attempts, same contract
-    // as deliverImage: together with reusing the uploaded media descriptor,
-    // every send attempt carries a byte-identical payload.
+    // Stable idempotency key and name across attempts, same contract as
+    // deliverImage: every send attempt carries a byte-identical payload.
     const clientId = `wechat-acp-${crypto.randomUUID()}`;
-    const mime = audio.mimeType.trim().toLowerCase();
-    const ext = Object.hasOwn(AUDIO_MIME_EXTENSIONS, mime) ? AUDIO_MIME_EXTENSIONS[mime] : "bin";
-    const fileName = `audio-${new Date().toISOString().replace(/[:.]/g, "-")}.${ext}`;
+    const fileName = sanitizeFileName(file.name);
     const sendOpts = {
       baseUrl: this.tokenData!.baseUrl,
       token: this.tokenData!.token,
@@ -795,11 +877,11 @@ export class WeChatAcpBridge {
         await this.paceConsecutiveSend(userId);
         await sendFileItem(userId, media, fileName, sendOpts, clientId);
         trackEvent(
-          "reply.audio.sent",
+          `reply.${telemetryKind}.sent`,
           {
             userIdHash: hashUserId(userId),
             bytes: buffer.length,
-            mimeType: audio.mimeType,
+            mimeType: file.mimeType,
             durationMs: Date.now() - startedAt,
           },
           hashUserId(userId),
@@ -808,7 +890,7 @@ export class WeChatAcpBridge {
         return;
       } catch (err) {
         lastError = err;
-        trackException(err, "reply.audio", hashUserId(userId));
+        trackException(err, `reply.${telemetryKind}`, hashUserId(userId));
         if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
           await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));
         }
@@ -818,7 +900,7 @@ export class WeChatAcpBridge {
     // Propagate so the ACP client appends its delivery-failure placeholder.
     throw lastError instanceof Error
       ? lastError
-      : new Error(`deliverAudio: failed after ${SEGMENT_SEND_MAX_ATTEMPTS} attempts`);
+      : new Error(`deliverFile: failed after ${SEGMENT_SEND_MAX_ATTEMPTS} attempts`);
   }
 
   /**

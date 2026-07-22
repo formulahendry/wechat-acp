@@ -38,7 +38,8 @@ export type EventName =
   | "prompt.completed"
   | "reply.sent"
   | "reply.image.sent"
-  | "reply.audio.sent";
+  | "reply.audio.sent"
+  | "reply.file.sent";
 
 type PropValue = string | number | boolean;
 
