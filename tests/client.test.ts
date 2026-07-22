@@ -898,6 +898,76 @@ test("resource_link in agent_message_chunk resolves and delivers a file", async 
   assert.equal(files[0].name, "result.zip");
 });
 
+test("image resource_link resolves and delivers through the native image pipeline", async () => {
+  const images: AgentImage[] = [];
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    resolveResourceLink: async () => ({
+      data: PNG_BASE64,
+      name: "screenshot.jpg",
+      mimeType: "image/jpeg",
+    }),
+    onImageFlush: async (image) => {
+      images.push(image);
+    },
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "resource_link",
+        uri: "wechat-acp://artifact/screenshot",
+        name: "screenshot.jpg",
+        mimeType: "image/jpeg",
+      },
+    },
+  } as never);
+
+  assert.deepEqual(images, [{ data: PNG_BASE64, mimeType: "image/jpeg" }]);
+  assert.equal(files.length, 0);
+  assert.equal(await client.flush(), "");
+});
+
+test("image resource_link falls back to file delivery when images are hidden", async () => {
+  const images: AgentImage[] = [];
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    showImages: false,
+    resolveResourceLink: async () => ({
+      data: PNG_BASE64,
+      name: "hidden-image.jpg",
+      mimeType: "image/jpeg",
+    }),
+    onImageFlush: async (image) => {
+      images.push(image);
+    },
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "resource_link",
+        uri: "wechat-acp://artifact/hidden-image",
+        name: "hidden-image.jpg",
+        mimeType: "image/jpeg",
+      },
+    },
+  } as never);
+
+  assert.equal(images.length, 0);
+  assert.deepEqual(files, [
+    { data: PNG_BASE64, name: "hidden-image.jpg", mimeType: "image/jpeg" },
+  ]);
+});
+
 test("completed tool_call resource_link is delivered for Codex-style output", async () => {
   const files: AgentFile[] = [];
   const client = makeClient({
@@ -1572,6 +1642,45 @@ test("Copilot CLI rawOutput resource_link resolves and delivers a file", async (
       message.includes("[resource link entries: 1 rawOutput fallback]"),
     ),
   );
+});
+
+test("Copilot CLI rawOutput image resource_link resolves and delivers a native image", async () => {
+  const images: AgentImage[] = [];
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    resolveResourceLink: async (link) => ({
+      data: PNG_BASE64,
+      name: link.name ?? "screenshot.jpg",
+      mimeType: link.mimeType ?? "image/jpeg",
+    }),
+    onImageFlush: async (image) => {
+      images.push(image);
+    },
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await emitToolCallRawOutputImage(
+    client,
+    {
+      content: "",
+      detailedContent: "",
+      contents: [
+        {
+          type: "resource_link",
+          uri: "file:///workspace/screenshot.jpg",
+          name: "screenshot.jpg",
+          mimeType: "image/jpeg",
+          size: 128,
+        },
+      ],
+    },
+    [{ type: "content", content: { type: "text", text: "" } }],
+  );
+
+  assert.deepEqual(images, [{ data: PNG_BASE64, mimeType: "image/jpeg" }]);
+  assert.equal(files.length, 0);
 });
 
 test("standard resource_link suppresses the mirrored rawOutput link", async () => {

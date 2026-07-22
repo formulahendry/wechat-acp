@@ -478,6 +478,7 @@ export class WeChatAcpClient implements acp.Client {
         let resourceContentBlocks = 0;
         let resourceLinkContentBlocks = 0;
         let resourceImages = 0;
+        let resourceLinkImages = 0;
         if (update.status === "completed" && update.content) {
           for (const c of update.content) {
             if (c.type === "diff") {
@@ -507,7 +508,9 @@ export class WeChatAcpClient implements acp.Client {
               }
             } else if (c.type === "content" && c.content.type === "resource_link") {
               resourceLinkContentBlocks++;
-              await this.maybeSendResourceLink(c.content, turn);
+              if (await this.maybeSendResourceLink(c.content, turn)) {
+                resourceLinkImages++;
+              }
             }
           }
         }
@@ -529,11 +532,14 @@ export class WeChatAcpClient implements acp.Client {
           rawOutputResourceImages = viaRawOutput.images;
         }
         let rawOutputResourceLinks = 0;
+        let rawOutputResourceLinkImages = 0;
         if (update.status === "completed" && resourceLinkContentBlocks === 0) {
-          rawOutputResourceLinks = await this.maybeSendRawOutputResourceLinks(
+          const viaRawOutput = await this.maybeSendRawOutputResourceLinks(
             update.rawOutput,
             turn,
           );
+          rawOutputResourceLinks = viaRawOutput.links;
+          rawOutputResourceLinkImages = viaRawOutput.images;
         }
         // Copilot CLI compatibility: the CLI emits tool-result images only in
         // rawOutput.binaryResultsForLlm and never as ACP image content blocks
@@ -546,7 +552,9 @@ export class WeChatAcpClient implements acp.Client {
           update.status === "completed" &&
           imageContentBlocks === 0 &&
           resourceImages === 0 &&
-          rawOutputResourceImages === 0
+          rawOutputResourceImages === 0 &&
+          resourceLinkImages === 0 &&
+          rawOutputResourceLinkImages === 0
         ) {
           rawOutputImages = await this.maybeSendRawOutputImages(update.rawOutput, turn);
         }
@@ -554,10 +562,10 @@ export class WeChatAcpClient implements acp.Client {
           // Surface where images came from so field issues like issue 55
           // (image present but in a non-standard location) show up in logs.
           const imageNote =
-            imageContentBlocks + resourceImages > 0
-              ? ` [images: ${imageContentBlocks + resourceImages} content block]`
-              : rawOutputImages > 0
-                ? ` [images: ${rawOutputImages} rawOutput fallback]`
+            imageContentBlocks + resourceImages + resourceLinkImages > 0
+              ? ` [images: ${imageContentBlocks + resourceImages + resourceLinkImages} content block]`
+              : rawOutputImages + rawOutputResourceLinkImages > 0
+                ? ` [images: ${rawOutputImages + rawOutputResourceLinkImages} rawOutput fallback]`
                 : "";
           const resourceNote =
             rawOutputResources > 0 ? ` [resources: ${rawOutputResources} rawOutput fallback]` : "";
@@ -777,12 +785,13 @@ export class WeChatAcpClient implements acp.Client {
   private async maybeSendRawOutputResourceLinks(
     rawOutput: unknown,
     turn: TurnState,
-  ): Promise<number> {
-    if (typeof rawOutput !== "object" || rawOutput === null) return 0;
+  ): Promise<{ links: number; images: number }> {
+    if (typeof rawOutput !== "object" || rawOutput === null) return { links: 0, images: 0 };
     const { contents } = rawOutput as { contents?: unknown };
-    if (!Array.isArray(contents)) return 0;
+    if (!Array.isArray(contents)) return { links: 0, images: 0 };
 
     let links = 0;
+    let images = 0;
     for (const entry of contents) {
       if (typeof entry !== "object" || entry === null) continue;
       const { type, uri, name, mimeType, size } = entry as {
@@ -794,7 +803,7 @@ export class WeChatAcpClient implements acp.Client {
       };
       if (type !== "resource_link" || typeof uri !== "string" || !uri) continue;
       links++;
-      await this.maybeSendResourceLink(
+      if (await this.maybeSendResourceLink(
         {
           uri,
           ...(typeof name === "string" ? { name } : {}),
@@ -802,24 +811,26 @@ export class WeChatAcpClient implements acp.Client {
           ...(typeof size === "number" ? { size } : {}),
         },
         turn,
-      );
+      )) {
+        images++;
+      }
     }
-    return links;
+    return { links, images };
   }
 
   private async maybeSendResourceLink(
     link: AgentResourceLink,
     turn: TurnState,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const opts = turn.opts;
     const name = sanitizeInlineLabel(link.name ?? resourceDisplayName(link.uri));
     if (opts.showResources === false) {
       opts.log(`[resource-link] skipped (showResources=false, ${name})`);
-      return;
+      return false;
     }
     if (turn.deliveredResourceLinks.has(link.uri)) {
       opts.log(`[resource-link] skipped duplicate: ${name}`);
-      return;
+      return false;
     }
     turn.deliveredResourceLinks.add(link.uri);
 
@@ -827,7 +838,7 @@ export class WeChatAcpClient implements acp.Client {
       turn.chunks.push(`\n📎 [resource link: ${name} - file resolver unavailable]\n`);
       turn.producedMessage = true;
       opts.log(`[resource-link] resolver unavailable: ${name}`);
-      return;
+      return false;
     }
 
     try {
@@ -836,37 +847,49 @@ export class WeChatAcpClient implements acp.Client {
         turn.chunks.push(`\n📎 [resource link: ${name} - file unavailable]\n`);
         turn.producedMessage = true;
         opts.log(`[resource-link] unavailable: ${name}`);
-        return;
+        return false;
       }
-      await this.maybeSendFile(file, turn);
+      return await this.maybeSendFile(file, turn);
     } catch (err) {
       turn.chunks.push(`\n⚠️ [file ${name} could not be resolved]\n`);
       turn.producedMessage = true;
       opts.log(`[resource-link] resolve failed for ${name}: ${String(err)}`);
+      return false;
     }
   }
 
-  private async maybeSendFile(file: AgentFile, turn: TurnState): Promise<void> {
+  private async maybeSendFile(file: AgentFile, turn: TurnState): Promise<boolean> {
     const opts = turn.opts;
     const name = sanitizeInlineLabel(file.name) || "artifact";
     const mimeType =
       sanitizeInlineLabel(file.mimeType).split(";")[0].trim().toLowerCase() ||
       "application/octet-stream";
+    const decodedBytes = decodedBase64ByteLength(file.data);
+    if (
+      opts.showImages !== false &&
+      opts.onImageFlush &&
+      SUPPORTED_IMAGE_MIME_TYPES.has(mimeType) &&
+      decodedBytes <= MAX_IMAGE_BYTES
+    ) {
+      opts.log(`[file] routing image file ${name} through image pipeline (${mimeType}, ${decodedBytes} bytes)`);
+      await this.maybeSendImage({ data: file.data, mimeType }, turn);
+      return true;
+    }
+
     if (!opts.onFileFlush) {
       turn.chunks.push(`\n📎 [file: ${name} (${mimeType}) - delivery unavailable]\n`);
       turn.producedMessage = true;
       opts.log(`[file] skipped (no file sink configured, ${name})`);
-      return;
+      return false;
     }
 
-    const decodedBytes = decodedBase64ByteLength(file.data);
     if (decodedBytes > MAX_AGENT_FILE_BYTES) {
       turn.chunks.push(`\n⚠️ [file ${name} is too large to deliver]\n`);
       turn.producedMessage = true;
       opts.log(
         `[file] skipped oversized file ${name} (${decodedBytes} bytes > ${MAX_AGENT_FILE_BYTES})`,
       );
-      return;
+      return false;
     }
 
     await this.maybeFlushMessage(turn);
@@ -874,10 +897,12 @@ export class WeChatAcpClient implements acp.Client {
       await opts.onFileFlush({ data: file.data, name, mimeType });
       opts.log(`[file] sent ${name} (${mimeType}, ${decodedBytes} bytes)`);
       turn.producedMessage = true;
+      return false;
     } catch (err) {
       turn.chunks.push(`\n⚠️ [file ${name} could not be delivered]\n`);
       turn.producedMessage = true;
       opts.log(`[file] delivery failed for ${name}: ${String(err)}`);
+      return false;
     }
   }
 
