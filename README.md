@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/formulahendry-wechat-acp-badge.png)](https://mseep.ai/app/formulahendry-wechat-acp)
+
 # WeChat ACP
 
 [![NPM Downloads](https://img.shields.io/npm/d18m/wechat-acp)](https://www.npmjs.com/package/wechat-acp)
