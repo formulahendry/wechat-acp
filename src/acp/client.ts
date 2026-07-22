@@ -670,11 +670,14 @@ export class WeChatAcpClient implements acp.Client {
         // Rebuild a clean resource object instead of forwarding the raw one,
         // so a text resource is exactly TextResourceContents (the render
         // path discriminates on `"text" in resource`) and junk fields or a
-        // non-string mimeType never reach the pipeline.
+        // non-string mimeType never reach the pipeline. Blank text does not
+        // count as a resource entry: maybeRenderResource skips it without
+        // rendering, and counting it would suppress the binaryResultsForLlm
+        // fallback and drop a blob that exists only there.
         const name = typeof uri === "string" ? uri : "";
         const mime = typeof mimeType === "string" ? { mimeType } : {};
         let clean: acp.EmbeddedResource["resource"];
-        if (typeof text === "string") {
+        if (typeof text === "string" && text.trim()) {
           clean = { uri: name, text, ...mime };
         } else if (typeof blob === "string" && blob) {
           clean = { uri: name, blob, ...mime };

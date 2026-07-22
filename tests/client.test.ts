@@ -1451,3 +1451,24 @@ test("malformed rawOutput resource entries are ignored safely", async () => {
   assert.equal(images.length, 0);
   assert.equal(client.hasProducedMessage, false);
 });
+
+test("blank text entry in rawOutput.contents does not suppress the binaryResultsForLlm fallback", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    contents: [
+      { type: "resource", resource: { uri: "file:///empty.txt", mimeType: "text/plain", text: "  \n" } },
+    ],
+    binaryResultsForLlm: [
+      { type: "resource", data: BLOB_BASE64, mimeType: "application/octet-stream" },
+    ],
+  });
+
+  const text = await client.flush();
+  assert.match(
+    text,
+    /📎 \[resource: resource \(application\/octet-stream, ~\d+ bytes\) - binary content not rendered\]/,
+    "blob present only in binaryResultsForLlm must still render",
+  );
+});
