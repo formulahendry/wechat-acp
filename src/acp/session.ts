@@ -7,7 +7,13 @@
 
 import type { ChildProcess } from "node:child_process";
 import type * as acp from "@agentclientprotocol/sdk";
-import { WeChatAcpClient, type AgentImage, type AgentAudio } from "./client.js";
+import {
+  WeChatAcpClient,
+  type AgentImage,
+  type AgentAudio,
+  type AgentFile,
+} from "./client.js";
+import type { AgentResourceLink } from "../artifacts/types.js";
 import { spawnAgent, killAgent, type AgentProcessInfo } from "./agent-manager.js";
 import { trackEvent, trackException, hashUserId } from "../telemetry/index.js";
 
@@ -46,11 +52,17 @@ export interface UserSession {
   contextToken: string;
   client: WeChatAcpClient;
   agentInfo: AgentProcessInfo;
+  mcpLease?: SessionMcpLease;
   configOptions: acp.SessionConfigOption[];
   queue: PendingMessage[];
   processing: boolean;
   lastActivity: number;
   createdAt: number;
+}
+
+export interface SessionMcpLease {
+  mcpServer: acp.McpServer;
+  close(): Promise<void>;
 }
 
 export interface SessionManagerOpts {
@@ -66,15 +78,21 @@ export interface SessionManagerOpts {
   showImages?: boolean;
   showAudio?: boolean;
   showResources?: boolean;
+  createMcpLease?: () => SessionMcpLease;
   log: (msg: string) => void;
   onReply: (userId: string, contextToken: string, text: string) => Promise<void>;
   onReplyImage?: (userId: string, contextToken: string, image: AgentImage) => Promise<void>;
   onReplyAudio?: (userId: string, contextToken: string, audio: AgentAudio) => Promise<void>;
+  onReplyFile?: (userId: string, contextToken: string, file: AgentFile) => Promise<void>;
+  resolveResourceLink?: (link: AgentResourceLink) => Promise<AgentFile | null>;
   sendTyping: (userId: string, contextToken: string) => Promise<void>;
 }
 
 export class SessionManager {
   private sessions = new Map<string, UserSession>();
+  private pendingSessions = new Map<string, Promise<UserSession>>();
+  private creationChain: Promise<void> = Promise.resolve();
+  private creationAbortController = new AbortController();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private opts: SessionManagerOpts;
   private aborted = false;
@@ -91,17 +109,32 @@ export class SessionManager {
 
   async stop(): Promise<void> {
     this.aborted = true;
+    this.creationAbortController.abort();
     if (this.cleanupTimer) {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
+    await Promise.allSettled([...this.pendingSessions.values()]);
     // Kill all agent processes
+    const closingLeases: Promise<void>[] = [];
     for (const [userId, session] of this.sessions) {
       this.opts.log(`Stopping session for ${userId}`);
       this.rejectQueuedCompletions(session, new Error("Session stopped before queued message was processed"));
       killAgent(session.agentInfo.process);
+      if (session.mcpLease) closingLeases.push(session.mcpLease.close());
     }
     this.sessions.clear();
+    const results = await Promise.allSettled(closingLeases);
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult =>
+        result.status === "rejected",
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures.map((failure) => failure.reason),
+        "Failed to close session MCP leases",
+      );
+    }
   }
 
   async enqueue(userId: string, message: PendingMessage): Promise<void> {
@@ -109,17 +142,9 @@ export class SessionManager {
       throw new Error("Session manager is stopped");
     }
 
-    let session = this.sessions.get(userId);
-
-    if (!session) {
-      if (this.sessions.size >= this.opts.maxConcurrentUsers) {
-        // Evict oldest idle session
-        this.evictOldest();
-      }
-
-      session = await this.createSession(userId, message.contextToken);
-      this.sessions.set(userId, session);
-    }
+    const session =
+      this.sessions.get(userId) ??
+      (await this.getOrCreateSession(userId, message.contextToken));
 
     // Always update contextToken to the latest
     session.contextToken = message.contextToken;
@@ -223,6 +248,69 @@ export class SessionManager {
     return this.sessions.size;
   }
 
+  private getOrCreateSession(
+    userId: string,
+    contextToken: string,
+  ): Promise<UserSession> {
+    const existing = this.sessions.get(userId);
+    if (existing) return Promise.resolve(existing);
+    const pending = this.pendingSessions.get(userId);
+    if (pending) return pending;
+
+    const creation = this.withCreationLock(async () => {
+      if (this.aborted) {
+        throw new Error("Session manager is stopped");
+      }
+      const existingAfterWait = this.sessions.get(userId);
+      if (existingAfterWait) return existingAfterWait;
+      if (this.sessions.size >= this.opts.maxConcurrentUsers) {
+        this.evictOldest();
+      }
+      if (this.sessions.size >= this.opts.maxConcurrentUsers) {
+        throw new Error(
+          `Maximum concurrent sessions reached (${this.opts.maxConcurrentUsers})`,
+        );
+      }
+
+      const created = await this.createSession(userId, contextToken);
+      if (this.aborted) {
+        killAgent(created.agentInfo.process);
+        await created.mcpLease?.close();
+        throw new Error("Session manager stopped while creating a session");
+      }
+
+      const winner = this.sessions.get(userId);
+      if (winner) {
+        killAgent(created.agentInfo.process);
+        await created.mcpLease?.close();
+        return winner;
+      }
+      this.sessions.set(userId, created);
+      return created;
+    });
+    this.pendingSessions.set(userId, creation);
+    void creation.finally(() => {
+      if (this.pendingSessions.get(userId) === creation) {
+        this.pendingSessions.delete(userId);
+      }
+    }).catch(() => {});
+    return creation;
+  }
+
+  private withCreationLock<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.creationChain.then(task);
+    this.creationChain = run.then(
+      () =>
+        new Promise<void>((resolve) => {
+          // Let the creator enqueue its first message and mark the session
+          // processing before another user can treat it as idle and evict it.
+          setImmediate(resolve);
+        }),
+      () => undefined,
+    );
+    return run;
+  }
+
   private async createSession(userId: string, contextToken: string): Promise<UserSession> {
     this.opts.log(`Creating new session for ${userId}`);
 
@@ -236,6 +324,10 @@ export class SessionManager {
       ...(this.opts.onReplyAudio
         ? { onAudioFlush: (audio: AgentAudio) => this.opts.onReplyAudio!(userId, contextToken, audio) }
         : {}),
+      ...(this.opts.onReplyFile
+        ? { onFileFlush: (file: AgentFile) => this.opts.onReplyFile!(userId, contextToken, file) }
+        : {}),
+      resolveResourceLink: this.opts.resolveResourceLink,
       onConfigOptionsUpdate: (configOptions) => {
         const session = this.sessions.get(userId);
         if (!session || session.client !== client) return;
@@ -250,14 +342,23 @@ export class SessionManager {
       showResources: this.opts.showResources ?? true,
     });
 
-    const agentInfo = await spawnAgent({
-      command: this.opts.agentCommand,
-      args: this.opts.agentArgs,
-      cwd: this.opts.agentCwd,
-      env: this.opts.agentEnv,
-      client,
-      log: (msg) => this.opts.log(`[${userId}] ${msg}`),
-    });
+    const mcpLease = this.opts.createMcpLease?.();
+    let agentInfo: AgentProcessInfo;
+    try {
+      agentInfo = await spawnAgent({
+        command: this.opts.agentCommand,
+        args: this.opts.agentArgs,
+        cwd: this.opts.agentCwd,
+        env: this.opts.agentEnv,
+        client,
+        mcpServers: mcpLease ? [mcpLease.mcpServer] : [],
+        signal: this.creationAbortController.signal,
+        log: (msg) => this.opts.log(`[${userId}] ${msg}`),
+      });
+    } catch (err) {
+      await mcpLease?.close();
+      throw err;
+    }
 
     trackEvent(
       "session.created",
@@ -276,6 +377,9 @@ export class SessionManager {
         this.opts.log(`Agent process for ${userId} exited, removing session`);
         this.rejectQueuedCompletions(s, new Error("Agent process exited before queued message was processed"));
         this.sessions.delete(userId);
+        void s.mcpLease?.close().catch((err) => {
+          this.opts.log(`[${userId}] Failed to close artifact MCP lease: ${String(err)}`);
+        });
       }
     });
 
@@ -284,6 +388,7 @@ export class SessionManager {
       contextToken,
       client,
       agentInfo,
+      mcpLease,
       configOptions: agentInfo.configOptions,
       queue: [],
       processing: false,
@@ -318,6 +423,12 @@ export class SessionManager {
             ? {
                 onAudioFlush: (audio: AgentAudio) =>
                   this.opts.onReplyAudio!(session.userId, pending.contextToken, audio),
+              }
+            : {}),
+          ...(this.opts.onReplyFile
+            ? {
+                onFileFlush: (file: AgentFile) =>
+                  this.opts.onReplyFile!(session.userId, pending.contextToken, file),
               }
             : {}),
         });
@@ -397,6 +508,7 @@ export class SessionManager {
             this.opts.log(`[${session.userId}] Agent process died, removing session`);
             this.rejectQueuedCompletions(session, err);
             this.sessions.delete(session.userId);
+            await session.mcpLease?.close();
             return;
           }
 
@@ -436,6 +548,9 @@ export class SessionManager {
         this.opts.log(`Session for ${userId} idle for ${Math.round((now - session.lastActivity) / 60_000)}min, removing`);
         killAgent(session.agentInfo.process);
         this.sessions.delete(userId);
+        void session.mcpLease?.close().catch((err) => {
+          this.opts.log(`[${userId}] Failed to close artifact MCP lease: ${String(err)}`);
+        });
       }
     }
   }
@@ -454,6 +569,9 @@ export class SessionManager {
         this.rejectQueuedCompletions(session, new Error("Session evicted before queued message was processed"));
         killAgent(session.agentInfo.process);
         this.sessions.delete(oldest.userId);
+        void session.mcpLease?.close().catch((err) => {
+          this.opts.log(`[${oldest.userId}] Failed to close artifact MCP lease: ${String(err)}`);
+        });
       }
     }
   }

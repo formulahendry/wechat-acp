@@ -8,7 +8,14 @@
 
 import fs from "node:fs";
 import type * as acp from "@agentclientprotocol/sdk";
+import {
+  type AgentFile,
+  type AgentResourceLink,
+  MAX_AGENT_FILE_BYTES,
+} from "../artifacts/types.js";
 import { TEXT_CHUNK_LIMIT } from "../weixin/send.js";
+
+export type { AgentFile } from "../artifacts/types.js";
 
 /** An image content block produced by the agent, ready for outbound delivery. */
 export interface AgentImage {
@@ -113,6 +120,11 @@ function sanitizeInlineLabel(value: string): string {
   return collapsed.length > MAX_LABEL_CHARS
     ? `${collapsed.slice(0, MAX_LABEL_CHARS - 3)}...`
     : collapsed;
+}
+
+function decodedBase64ByteLength(data: string): number {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
 }
 
 /**
@@ -252,6 +264,8 @@ export interface WeChatAcpClientOpts {
   onMessageFlush: (text: string) => Promise<void>;
   onImageFlush?: (image: AgentImage) => Promise<void>;
   onAudioFlush?: (audio: AgentAudio) => Promise<void>;
+  onFileFlush?: (file: AgentFile) => Promise<void>;
+  resolveResourceLink?: (link: AgentResourceLink) => Promise<AgentFile | null>;
   onConfigOptionsUpdate?: (configOptions: acp.SessionConfigOption[]) => void;
   log: (msg: string) => void;
   showThoughts: boolean;
@@ -275,10 +289,18 @@ interface TurnState {
   thoughtChunks: string[];
   producedMessage: boolean;
   lastTypingAt: number;
+  deliveredResourceLinks: Set<string>;
 }
 
 function freshTurn(opts: WeChatAcpClientOpts): TurnState {
-  return { opts, chunks: [], thoughtChunks: [], producedMessage: false, lastTypingAt: 0 };
+  return {
+    opts,
+    chunks: [],
+    thoughtChunks: [],
+    producedMessage: false,
+    lastTypingAt: 0,
+    deliveredResourceLinks: new Set(),
+  };
 }
 
 export class WeChatAcpClient implements acp.Client {
@@ -329,6 +351,7 @@ export class WeChatAcpClient implements acp.Client {
     onMessageFlush: (text: string) => Promise<void>;
     onImageFlush?: (image: AgentImage) => Promise<void>;
     onAudioFlush?: (audio: AgentAudio) => Promise<void>;
+    onFileFlush?: (file: AgentFile) => Promise<void>;
   }): Promise<void> {
     return this.enqueue(async () => {
       const previous = this.turn;
@@ -339,6 +362,7 @@ export class WeChatAcpClient implements acp.Client {
         onMessageFlush: callbacks.onMessageFlush,
         ...(callbacks.onImageFlush ? { onImageFlush: callbacks.onImageFlush } : {}),
         ...(callbacks.onAudioFlush ? { onAudioFlush: callbacks.onAudioFlush } : {}),
+        ...(callbacks.onFileFlush ? { onFileFlush: callbacks.onFileFlush } : {}),
       };
       const staleText = previous.chunks.join("");
       const staleThoughts = previous.thoughtChunks.join("");
@@ -416,6 +440,8 @@ export class WeChatAcpClient implements acp.Client {
           await this.maybeSendAudio(update.content, turn);
         } else if (update.content.type === "resource") {
           await this.maybeRenderResource(update.content.resource, turn);
+        } else if (update.content.type === "resource_link") {
+          await this.maybeSendResourceLink(update.content, turn);
         }
         // Throttle typing indicators
         await this.maybeSendTyping(turn);
@@ -424,6 +450,13 @@ export class WeChatAcpClient implements acp.Client {
       case "tool_call":
         await this.maybeFlushThoughts(turn);
         await this.maybeFlushMessage(turn);
+        if (update.status === "completed" && update.content) {
+          for (const content of update.content) {
+            if (content.type === "content" && content.content.type === "resource_link") {
+              await this.maybeSendResourceLink(content.content, turn);
+            }
+          }
+        }
         opts.log(`[tool] ${update.title} (${update.status})`);
         await this.maybeSendTyping(turn);
         break;
@@ -443,6 +476,7 @@ export class WeChatAcpClient implements acp.Client {
       case "tool_call_update": {
         let imageContentBlocks = 0;
         let resourceContentBlocks = 0;
+        let resourceLinkContentBlocks = 0;
         let resourceImages = 0;
         if (update.status === "completed" && update.content) {
           for (const c of update.content) {
@@ -471,6 +505,9 @@ export class WeChatAcpClient implements acp.Client {
               if (await this.maybeRenderResource(c.content.resource, turn)) {
                 resourceImages++;
               }
+            } else if (c.type === "content" && c.content.type === "resource_link") {
+              resourceLinkContentBlocks++;
+              await this.maybeSendResourceLink(c.content, turn);
             }
           }
         }
@@ -490,6 +527,13 @@ export class WeChatAcpClient implements acp.Client {
           const viaRawOutput = await this.maybeRenderRawOutputResources(update.rawOutput, turn);
           rawOutputResources = viaRawOutput.resources;
           rawOutputResourceImages = viaRawOutput.images;
+        }
+        let rawOutputResourceLinks = 0;
+        if (update.status === "completed" && resourceLinkContentBlocks === 0) {
+          rawOutputResourceLinks = await this.maybeSendRawOutputResourceLinks(
+            update.rawOutput,
+            turn,
+          );
         }
         // Copilot CLI compatibility: the CLI emits tool-result images only in
         // rawOutput.binaryResultsForLlm and never as ACP image content blocks
@@ -517,7 +561,13 @@ export class WeChatAcpClient implements acp.Client {
                 : "";
           const resourceNote =
             rawOutputResources > 0 ? ` [resources: ${rawOutputResources} rawOutput fallback]` : "";
-          opts.log(`[tool] ${update.toolCallId} → ${update.status}${imageNote}${resourceNote}`);
+          const linkNote =
+            rawOutputResourceLinks > 0
+              ? ` [resource link entries: ${rawOutputResourceLinks} rawOutput fallback]`
+              : "";
+          opts.log(
+            `[tool] ${update.toolCallId} → ${update.status}${imageNote}${resourceNote}${linkNote}`,
+          );
         }
         await this.maybeSendTyping(turn);
         break;
@@ -720,6 +770,118 @@ export class WeChatAcpClient implements acp.Client {
   }
 
   /**
+   * Copilot CLI keeps MCP resource links in rawOutput.contents rather than
+   * promoting them to ACP content blocks. Parse only the documented fields
+   * needed by the normal resource-link delivery path.
+   */
+  private async maybeSendRawOutputResourceLinks(
+    rawOutput: unknown,
+    turn: TurnState,
+  ): Promise<number> {
+    if (typeof rawOutput !== "object" || rawOutput === null) return 0;
+    const { contents } = rawOutput as { contents?: unknown };
+    if (!Array.isArray(contents)) return 0;
+
+    let links = 0;
+    for (const entry of contents) {
+      if (typeof entry !== "object" || entry === null) continue;
+      const { type, uri, name, mimeType, size } = entry as {
+        type?: unknown;
+        uri?: unknown;
+        name?: unknown;
+        mimeType?: unknown;
+        size?: unknown;
+      };
+      if (type !== "resource_link" || typeof uri !== "string" || !uri) continue;
+      links++;
+      await this.maybeSendResourceLink(
+        {
+          uri,
+          ...(typeof name === "string" ? { name } : {}),
+          ...(typeof mimeType === "string" ? { mimeType } : {}),
+          ...(typeof size === "number" ? { size } : {}),
+        },
+        turn,
+      );
+    }
+    return links;
+  }
+
+  private async maybeSendResourceLink(
+    link: AgentResourceLink,
+    turn: TurnState,
+  ): Promise<void> {
+    const opts = turn.opts;
+    const name = sanitizeInlineLabel(link.name ?? resourceDisplayName(link.uri));
+    if (opts.showResources === false) {
+      opts.log(`[resource-link] skipped (showResources=false, ${name})`);
+      return;
+    }
+    if (turn.deliveredResourceLinks.has(link.uri)) {
+      opts.log(`[resource-link] skipped duplicate: ${name}`);
+      return;
+    }
+    turn.deliveredResourceLinks.add(link.uri);
+
+    if (!opts.resolveResourceLink) {
+      turn.chunks.push(`\n📎 [resource link: ${name} - file resolver unavailable]\n`);
+      turn.producedMessage = true;
+      opts.log(`[resource-link] resolver unavailable: ${name}`);
+      return;
+    }
+
+    try {
+      const file = await opts.resolveResourceLink(link);
+      if (!file) {
+        turn.chunks.push(`\n📎 [resource link: ${name} - file unavailable]\n`);
+        turn.producedMessage = true;
+        opts.log(`[resource-link] unavailable: ${name}`);
+        return;
+      }
+      await this.maybeSendFile(file, turn);
+    } catch (err) {
+      turn.chunks.push(`\n⚠️ [file ${name} could not be resolved]\n`);
+      turn.producedMessage = true;
+      opts.log(`[resource-link] resolve failed for ${name}: ${String(err)}`);
+    }
+  }
+
+  private async maybeSendFile(file: AgentFile, turn: TurnState): Promise<void> {
+    const opts = turn.opts;
+    const name = sanitizeInlineLabel(file.name) || "artifact";
+    const mimeType =
+      sanitizeInlineLabel(file.mimeType).split(";")[0].trim().toLowerCase() ||
+      "application/octet-stream";
+    if (!opts.onFileFlush) {
+      turn.chunks.push(`\n📎 [file: ${name} (${mimeType}) - delivery unavailable]\n`);
+      turn.producedMessage = true;
+      opts.log(`[file] skipped (no file sink configured, ${name})`);
+      return;
+    }
+
+    const decodedBytes = decodedBase64ByteLength(file.data);
+    if (decodedBytes > MAX_AGENT_FILE_BYTES) {
+      turn.chunks.push(`\n⚠️ [file ${name} is too large to deliver]\n`);
+      turn.producedMessage = true;
+      opts.log(
+        `[file] skipped oversized file ${name} (${decodedBytes} bytes > ${MAX_AGENT_FILE_BYTES})`,
+      );
+      return;
+    }
+
+    await this.maybeFlushMessage(turn);
+    try {
+      await opts.onFileFlush({ data: file.data, name, mimeType });
+      opts.log(`[file] sent ${name} (${mimeType}, ${decodedBytes} bytes)`);
+      turn.producedMessage = true;
+    } catch (err) {
+      turn.chunks.push(`\n⚠️ [file ${name} could not be delivered]\n`);
+      turn.producedMessage = true;
+      opts.log(`[file] delivery failed for ${name}: ${String(err)}`);
+    }
+  }
+
+  /**
    * Deliver an agent-produced image content block as a native WeChat image
    * message, preserving stream order: buffered text preceding the image is
    * flushed first, then the image is sent. Runs entirely within one task on
@@ -841,8 +1003,8 @@ export class WeChatAcpClient implements acp.Client {
    * with a naming header, so they flush in order with the surrounding
    * narrative through the existing buffer machinery. Blob resources with
    * an image MIME type reuse the image delivery pipeline (allow-list,
-   * size cap, ordering, placeholders); other blobs surface as a one-line
-   * placeholder instead of being dropped silently. Returns true when the
+   * size cap, ordering, placeholders); other blobs are delivered through the
+   * generic file pipeline. Returns true when the
    * resource belongs to the image pipeline (an allow-listed image blob with
    * images enabled and a sink configured), whether or not it was rendered:
    * a resource skipped by showResources=false still returns true so the
@@ -908,13 +1070,26 @@ export class WeChatAcpClient implements acp.Client {
       return true;
     }
 
-    // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes.
-    const approxBytes = Math.ceil(resource.blob.length / 4) * 3;
-    turn.chunks.push(
-      `\n📎 [resource: ${name} (${mime || "unknown type"}, ~${approxBytes} bytes) - binary content not rendered]\n`,
+    if (!opts.onFileFlush) {
+      const approxBytes = Math.ceil(resource.blob.length / 4) * 3;
+      turn.chunks.push(
+        `\n📎 [resource: ${name} (${mime || "unknown type"}, ~${approxBytes} bytes) - binary content not rendered]\n`,
+      );
+      turn.producedMessage = true;
+      opts.log(
+        `[resource] blob resource ${name} not rendered (${mime || "unknown type"}, ~${approxBytes} bytes)`,
+      );
+      return false;
+    }
+
+    await this.maybeSendFile(
+      {
+        data: resource.blob,
+        name,
+        mimeType: baseMime || "application/octet-stream",
+      },
+      turn,
     );
-    turn.producedMessage = true;
-    opts.log(`[resource] blob resource ${name} not rendered (${mime || "unknown type"}, ~${approxBytes} bytes)`);
     return false;
   }
 

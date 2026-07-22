@@ -15,6 +15,7 @@ Bridge WeChat direct messages to any ACP-compatible AI agent.
 - Built-in ACP agent presets for common CLIs
 - Custom raw agent command support
 - Agent image output delivered as native WeChat image messages
+- Agent audio, embedded resources, and generated files delivered to WeChat
 - Auto-allow permission requests from the agent
 - Direct message only; group chats are ignored
 - Background daemon mode
@@ -106,7 +107,7 @@ Options:
 - `--show-diffs`: forward ACP file diffs to WeChat (default: hidden)
 - `--hide-images`: do not forward agent image output to WeChat (default: forwarded)
 - `--hide-audio`: do not forward agent audio output to WeChat (default: forwarded)
-- `--hide-resources`: do not forward agent embedded resources to WeChat (default: forwarded)
+- `--hide-resources`: do not forward agent resources or generated file attachments to WeChat (default: forwarded)
 - `inject --text <text>`: enqueue a local text message for the running daemon
 - `-V, --version`: print version and exit
 - `-h, --help`: show help
@@ -368,6 +369,24 @@ Overrides:
 
 Text-typed files (`.md`, `.json`, source code, …) and images keep their previous behavior: their content is embedded inline in the prompt as a `resource` / `image` block, no disk write needed.
 
+## Receiving agent-generated files
+
+When the ACP agent advertises HTTP MCP support, `wechat-acp` injects a local
+`attach_file` tool into the session. The agent can call it with a file it
+created under the configured working directory, and the bridge sends that
+snapshot back as a WeChat file message.
+
+The MCP server listens only on a random `127.0.0.1` port, requires a
+process-local bearer token, rejects browser-origin requests, and only reads
+regular files whose resolved path stays inside the agent working directory.
+Files are limited to 25 MiB, kept briefly in memory, and consumed once.
+
+This also handles standard ACP `resource_link` output and Copilot CLI's
+`rawOutput.contents[type=resource_link]` compatibility shape. Agents that do
+not support HTTP MCP injection or do not forward resource links cannot use the
+active `attach_file` flow. `--hide-resources` disables both the tool injection
+and outbound resource/file delivery.
+
 ## Storage
 
 By default, runtime files are stored under:
@@ -392,7 +411,7 @@ When `--instance <name>` is used, the same files live under `~/.wechat-acp/insta
 ## Current Limitations
 
 - Direct messages only; group chats are ignored
-- MCP servers are not used
+- Agent-generated file delivery depends on the agent's HTTP MCP and resource-link support
 - Permission requests are auto-approved
 - Agent communication is subprocess-only over stdio
 - Some preset agents may require separate authentication before they can respond successfully
@@ -428,7 +447,7 @@ npm run dev
 WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 ```
 
-**What is collected** (17 event types only):
+**What is collected** (18 event types only):
 
 - `app.start` / `app.stop` — process lifecycle, agent preset name, daemon flag, uptime
 - `login.success` / `login.failure` / `token.reused` — WeChat login outcomes (no token, no QR URL)
@@ -444,8 +463,9 @@ WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 - `reply.sent` — reply pushed back to WeChat; segment count, total length
 - `reply.image.sent`: image reply pushed back to WeChat; byte size, MIME type, duration
 - `reply.audio.sent`: audio reply pushed back to WeChat as a file message; byte size, MIME type, duration
+- `reply.file.sent`: agent-generated file pushed back to WeChat; byte size, MIME type, duration
 
-Plus exception reports for `monitor`, `prompt`, `reply`, `reply.image`, `reply.audio`, `auth`, `agent_spawn`, `enqueue`, `buffer`, `command`, and `state` failures.
+Plus exception reports for `monitor`, `prompt`, `reply`, `reply.image`, `reply.audio`, `reply.file`, `artifact_mcp`, `auth`, `agent_spawn`, `enqueue`, `buffer`, `command`, and `state` failures.
 
 **What is never collected**: message bodies, filenames, voice transcripts, image URLs, login tokens, QR codes, raw agent command strings, environment variables, working directory paths, raw WeChat user IDs.
 
