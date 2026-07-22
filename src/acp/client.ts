@@ -127,6 +127,10 @@ function decodedBase64ByteLength(data: string): number {
   return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
 }
 
+function base64DecodedByteUpperBound(data: string): number {
+  return Math.ceil(data.length / 4) * 3;
+}
+
 /**
  * Human-readable name for a resource: the last path segment of its URI,
  * percent-decoded and sanitized to a single line. Falls back to the full
@@ -881,7 +885,7 @@ export class WeChatAcpClient implements acp.Client {
       opts.showImages !== false &&
       opts.onImageFlush &&
       SUPPORTED_IMAGE_MIME_TYPES.has(mimeType) &&
-      decodedBytes <= MAX_IMAGE_BYTES
+      base64DecodedByteUpperBound(file.data) <= MAX_IMAGE_BYTES
     ) {
       opts.log(`[file] routing image file ${name} through image pipeline (${mimeType}, ${decodedBytes} bytes)`);
       await this.maybeSendImage({ data: file.data, mimeType }, turn);
@@ -949,8 +953,8 @@ export class WeChatAcpClient implements acp.Client {
       opts.log(`[image] skipped unsupported type: ${mimeType}`);
       return;
     }
-    // ceil(base64Len / 4) * 3 over-estimates by at most 2 bytes; fine for a cap.
-    const approxBytes = Math.ceil(image.data.length / 4) * 3;
+    // The upper bound over-estimates by at most 2 bytes; fine for a cap.
+    const approxBytes = base64DecodedByteUpperBound(image.data);
     if (approxBytes > MAX_IMAGE_BYTES) {
       opts.log(`[image] skipped oversized image (~${approxBytes} bytes > ${MAX_IMAGE_BYTES})`);
       turn.chunks.push("\n⚠️ [image too large to deliver]\n");

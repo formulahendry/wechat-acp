@@ -945,6 +945,43 @@ test("image resource_link resolves and delivers through the native image pipelin
   assert.equal(await client.flush(), "");
 });
 
+test("padded image at the decoded limit falls back to file delivery", async () => {
+  const maxImageBytes = 10 * 1024 * 1024;
+  const encodedLength = 4 * Math.ceil(maxImageBytes / 3);
+  const data = `${"A".repeat(encodedLength - 2)}==`;
+  const images: AgentImage[] = [];
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    resolveResourceLink: async () => ({
+      data,
+      name: "limit.png",
+      mimeType: "image/png",
+    }),
+    onImageFlush: async (image) => {
+      images.push(image);
+    },
+    onFileFlush: async (file) => {
+      files.push(file);
+    },
+  });
+
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "agent_message_chunk",
+      content: {
+        type: "resource_link",
+        uri: "wechat-acp://artifact/limit-image",
+        name: "limit.png",
+        mimeType: "image/png",
+      },
+    },
+  } as never);
+
+  assert.equal(images.length, 0);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "limit.png");
+});
+
 test("image resource_link falls back to file delivery when images are hidden", async () => {
   const images: AgentImage[] = [];
   const files: AgentFile[] = [];
