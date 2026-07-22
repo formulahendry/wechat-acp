@@ -634,7 +634,7 @@ export class WeChatAcpClient implements acp.Client {
    * `rawOutput` as `unknown`, so every field is validated before use and
    * anything malformed is ignored. Valid entries reuse the standard
    * `maybeRenderResource` pipeline. Returns the number of resource entries
-   * handed to the pipeline plus how many of them were routed into the image
+   * handed to the pipeline plus how many of them belong to the image
    * pipeline, so the caller can suppress the rawOutput image fallback for
    * payloads that would otherwise deliver twice.
    */
@@ -843,9 +843,12 @@ export class WeChatAcpClient implements acp.Client {
    * an image MIME type reuse the image delivery pipeline (allow-list,
    * size cap, ordering, placeholders); other blobs surface as a one-line
    * placeholder instead of being dropped silently. Returns true when the
-   * resource was routed into the image pipeline, so the caller can count
-   * it against the rawOutput compatibility fallback and avoid delivering
-   * the same image twice.
+   * resource belongs to the image pipeline (an allow-listed image blob with
+   * images enabled and a sink configured), whether or not it was rendered:
+   * a resource skipped by showResources=false still returns true so the
+   * caller counts it against the rawOutput image compatibility fallback,
+   * otherwise the fallback would re-deliver the hidden resource from a
+   * mirrored binaryResultsForLlm image entry and bypass the setting.
    */
   private async maybeRenderResource(
     resource: acp.EmbeddedResource["resource"],
@@ -853,9 +856,25 @@ export class WeChatAcpClient implements acp.Client {
   ): Promise<boolean> {
     const opts = turn.opts;
     const name = resourceDisplayName(resource.uri);
+    // Classify before any early return so the image-pipeline verdict is
+    // consistent whether or not the resource is actually rendered. Routing
+    // requires an exact allow-listed base type (parameters stripped),
+    // images enabled, and a sink configured; every miss path in
+    // maybeSendImage other than the oversized/failure placeholders is
+    // log-and-skip, which is fine for image content blocks but would
+    // silently drop a resource (and a resource-only turn would then
+    // trigger the empty-turn notice), so anything not deliverable falls
+    // through to the visible placeholder instead.
+    const mime = sanitizeInlineLabel(resource.mimeType ?? "");
+    const baseMime = mime.split(";")[0].trim().toLowerCase();
+    const routesToImagePipeline =
+      !("text" in resource) &&
+      SUPPORTED_IMAGE_MIME_TYPES.has(baseMime) &&
+      opts.showImages !== false &&
+      Boolean(opts.onImageFlush);
     if (opts.showResources === false) {
       opts.log(`[resource] skipped (showResources=false, ${name})`);
-      return false;
+      return routesToImagePipeline;
     }
 
     if ("text" in resource) {
@@ -880,22 +899,9 @@ export class WeChatAcpClient implements acp.Client {
       return false;
     }
 
-    // Sanitized once here: the label feeds the placeholder, the logs, and
+    // Sanitized once above: the label feeds the placeholder, the logs, and
     // the value forwarded to the image pipeline.
-    const mime = sanitizeInlineLabel(resource.mimeType ?? "");
-    // Route into the image pipeline only when it can actually deliver:
-    // exact allow-listed base type (parameters stripped), images enabled,
-    // and a sink configured. Every miss path in maybeSendImage other than
-    // the oversized/failure placeholders is log-and-skip, which is fine
-    // for image content blocks but would silently drop a resource (and a
-    // resource-only turn would then trigger the empty-turn notice), so
-    // anything not deliverable falls through to the visible placeholder.
-    const baseMime = mime.split(";")[0].trim().toLowerCase();
-    if (
-      SUPPORTED_IMAGE_MIME_TYPES.has(baseMime) &&
-      opts.showImages !== false &&
-      opts.onImageFlush
-    ) {
+    if (routesToImagePipeline) {
       // Route through the image pipeline so an image handed back as an
       // embedded resource behaves exactly like an image content block.
       await this.maybeSendImage({ data: resource.blob, mimeType: baseMime }, turn);

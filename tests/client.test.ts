@@ -1472,3 +1472,47 @@ test("blank text entry in rawOutput.contents does not suppress the binaryResults
     "blob present only in binaryResultsForLlm must still render",
   );
 });
+
+test("hidden image resource in rawOutput.contents suppresses the image fallback (no hide-resources bypass)", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ showResources: false, onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    contents: [
+      {
+        type: "resource",
+        resource: { uri: "file:///chart.png", mimeType: "image/png", blob: PNG_BASE64 },
+      },
+    ],
+    binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }],
+  });
+
+  assert.equal(images.length, 0, "hidden resource must not leak through the image fallback");
+  const text = await client.flush();
+  assert.equal(text, "");
+});
+
+test("hidden image resource content block suppresses the image fallback (no hide-resources bypass)", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ showResources: false, onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(
+    client,
+    { binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }] },
+    [
+      {
+        type: "content",
+        content: {
+          type: "resource",
+          resource: { uri: "file:///chart.png", mimeType: "image/png", blob: PNG_BASE64 },
+        },
+      },
+    ],
+  );
+
+  assert.equal(images.length, 0, "hidden resource must not leak through the image fallback");
+  const text = await client.flush();
+  assert.equal(text, "");
+});
