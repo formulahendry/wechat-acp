@@ -442,6 +442,7 @@ export class WeChatAcpClient implements acp.Client {
 
       case "tool_call_update": {
         let imageContentBlocks = 0;
+        let resourceContentBlocks = 0;
         let resourceImages = 0;
         if (update.status === "completed" && update.content) {
           for (const c of update.content) {
@@ -466,11 +467,29 @@ export class WeChatAcpClient implements acp.Client {
             } else if (c.type === "content" && c.content.type === "audio") {
               await this.maybeSendAudio(c.content, turn);
             } else if (c.type === "content" && c.content.type === "resource") {
+              resourceContentBlocks++;
               if (await this.maybeRenderResource(c.content.resource, turn)) {
                 resourceImages++;
               }
             }
           }
+        }
+        // Copilot CLI compatibility: the CLI emits tool-result resources only
+        // in rawOutput (full resource in rawOutput.contents, a URI-less blob
+        // copy in rawOutput.binaryResultsForLlm) and never as ACP resource
+        // content blocks (issue 62). Parse rawOutput only when the standard
+        // path saw no resource block, so an agent that one day populates both
+        // never renders the same resource twice. Runs before the image
+        // fallback below: a resource routed into the image pipeline here
+        // counts into rawOutputResourceImages and suppresses the image
+        // fallback, which would otherwise re-deliver the same payload from a
+        // matching binaryResultsForLlm image entry.
+        let rawOutputResources = 0;
+        let rawOutputResourceImages = 0;
+        if (update.status === "completed" && resourceContentBlocks === 0) {
+          const viaRawOutput = await this.maybeRenderRawOutputResources(update.rawOutput, turn);
+          rawOutputResources = viaRawOutput.resources;
+          rawOutputResourceImages = viaRawOutput.images;
         }
         // Copilot CLI compatibility: the CLI emits tool-result images only in
         // rawOutput.binaryResultsForLlm and never as ACP image content blocks
@@ -479,7 +498,12 @@ export class WeChatAcpClient implements acp.Client {
         // produced no image, so an agent that one day populates both fields
         // never delivers the same image twice.
         let rawOutputImages = 0;
-        if (update.status === "completed" && imageContentBlocks === 0 && resourceImages === 0) {
+        if (
+          update.status === "completed" &&
+          imageContentBlocks === 0 &&
+          resourceImages === 0 &&
+          rawOutputResourceImages === 0
+        ) {
           rawOutputImages = await this.maybeSendRawOutputImages(update.rawOutput, turn);
         }
         if (update.status) {
@@ -491,7 +515,9 @@ export class WeChatAcpClient implements acp.Client {
               : rawOutputImages > 0
                 ? ` [images: ${rawOutputImages} rawOutput fallback]`
                 : "";
-          opts.log(`[tool] ${update.toolCallId} → ${update.status}${imageNote}`);
+          const resourceNote =
+            rawOutputResources > 0 ? ` [resources: ${rawOutputResources} rawOutput fallback]` : "";
+          opts.log(`[tool] ${update.toolCallId} → ${update.status}${imageNote}${resourceNote}`);
         }
         await this.maybeSendTyping(turn);
         break;
@@ -591,6 +617,106 @@ export class WeChatAcpClient implements acp.Client {
       }
     }
     return images;
+  }
+
+  /**
+   * Compatibility fallback for agents that emit tool-result resources only in
+   * `rawOutput` instead of ACP embedded resource content blocks. GitHub
+   * Copilot CLI puts the full resource (`uri`, `mimeType`, `text` or `blob`)
+   * in `rawOutput.contents[]` and a URI-less blob copy in
+   * `rawOutput.binaryResultsForLlm[]` as `{type: "resource", data, mimeType}`,
+   * while `update.content` carries only an empty text block (issue 62).
+   * `rawOutput.contents[]` is the primary source since it covers text and
+   * blob resources and preserves the URI for naming. Entries from
+   * `binaryResultsForLlm[]` are parsed only when `contents[]` yields no
+   * resource entry, which both de-duplicates the blob copy the CLI writes
+   * into both fields and keeps the richer shape authoritative. The spec types
+   * `rawOutput` as `unknown`, so every field is validated before use and
+   * anything malformed is ignored. Valid entries reuse the standard
+   * `maybeRenderResource` pipeline. Returns the number of resource entries
+   * handed to the pipeline plus how many of them belong to the image
+   * pipeline, so the caller can suppress the rawOutput image fallback for
+   * payloads that would otherwise deliver twice.
+   */
+  private async maybeRenderRawOutputResources(
+    rawOutput: unknown,
+    turn: TurnState,
+  ): Promise<{ resources: number; images: number }> {
+    const none = { resources: 0, images: 0 };
+    if (typeof rawOutput !== "object" || rawOutput === null) {
+      return none;
+    }
+    const { contents, binaryResultsForLlm } = rawOutput as {
+      contents?: unknown;
+      binaryResultsForLlm?: unknown;
+    };
+    let resources = 0;
+    let images = 0;
+    if (Array.isArray(contents)) {
+      for (const entry of contents) {
+        if (typeof entry !== "object" || entry === null) {
+          continue;
+        }
+        const { type, resource } = entry as { type?: unknown; resource?: unknown };
+        if (type !== "resource" || typeof resource !== "object" || resource === null) {
+          continue;
+        }
+        const { uri, mimeType, text, blob } = resource as {
+          uri?: unknown;
+          mimeType?: unknown;
+          text?: unknown;
+          blob?: unknown;
+        };
+        // Rebuild a clean resource object instead of forwarding the raw one,
+        // so a text resource is exactly TextResourceContents (the render
+        // path discriminates on `"text" in resource`) and junk fields or a
+        // non-string mimeType never reach the pipeline. Blank text does not
+        // count as a resource entry: maybeRenderResource skips it without
+        // rendering, and counting it would suppress the binaryResultsForLlm
+        // fallback and drop a blob that exists only there.
+        const name = typeof uri === "string" ? uri : "";
+        const mime = typeof mimeType === "string" ? { mimeType } : {};
+        let clean: acp.EmbeddedResource["resource"];
+        if (typeof text === "string" && text.trim()) {
+          clean = { uri: name, text, ...mime };
+        } else if (typeof blob === "string" && blob) {
+          clean = { uri: name, blob, ...mime };
+        } else {
+          continue;
+        }
+        resources++;
+        if (await this.maybeRenderResource(clean, turn)) {
+          images++;
+        }
+      }
+    }
+    if (resources > 0 || !Array.isArray(binaryResultsForLlm)) {
+      return { resources, images };
+    }
+    for (const entry of binaryResultsForLlm) {
+      if (typeof entry !== "object" || entry === null) {
+        continue;
+      }
+      const { type, data, mimeType } = entry as {
+        type?: unknown;
+        data?: unknown;
+        mimeType?: unknown;
+      };
+      if (type !== "resource" || typeof data !== "string" || !data) {
+        continue;
+      }
+      // No URI in this shape; resourceDisplayName falls back to "resource".
+      resources++;
+      const clean: acp.EmbeddedResource["resource"] = {
+        uri: "",
+        blob: data,
+        ...(typeof mimeType === "string" ? { mimeType } : {}),
+      };
+      if (await this.maybeRenderResource(clean, turn)) {
+        images++;
+      }
+    }
+    return { resources, images };
   }
 
   /**
@@ -717,9 +843,12 @@ export class WeChatAcpClient implements acp.Client {
    * an image MIME type reuse the image delivery pipeline (allow-list,
    * size cap, ordering, placeholders); other blobs surface as a one-line
    * placeholder instead of being dropped silently. Returns true when the
-   * resource was routed into the image pipeline, so the caller can count
-   * it against the rawOutput compatibility fallback and avoid delivering
-   * the same image twice.
+   * resource belongs to the image pipeline (an allow-listed image blob with
+   * images enabled and a sink configured), whether or not it was rendered:
+   * a resource skipped by showResources=false still returns true so the
+   * caller counts it against the rawOutput image compatibility fallback,
+   * otherwise the fallback would re-deliver the hidden resource from a
+   * mirrored binaryResultsForLlm image entry and bypass the setting.
    */
   private async maybeRenderResource(
     resource: acp.EmbeddedResource["resource"],
@@ -727,9 +856,25 @@ export class WeChatAcpClient implements acp.Client {
   ): Promise<boolean> {
     const opts = turn.opts;
     const name = resourceDisplayName(resource.uri);
+    // Classify before any early return so the image-pipeline verdict is
+    // consistent whether or not the resource is actually rendered. Routing
+    // requires an exact allow-listed base type (parameters stripped),
+    // images enabled, and a sink configured; every miss path in
+    // maybeSendImage other than the oversized/failure placeholders is
+    // log-and-skip, which is fine for image content blocks but would
+    // silently drop a resource (and a resource-only turn would then
+    // trigger the empty-turn notice), so anything not deliverable falls
+    // through to the visible placeholder instead.
+    const mime = sanitizeInlineLabel(resource.mimeType ?? "");
+    const baseMime = mime.split(";")[0].trim().toLowerCase();
+    const routesToImagePipeline =
+      !("text" in resource) &&
+      SUPPORTED_IMAGE_MIME_TYPES.has(baseMime) &&
+      opts.showImages !== false &&
+      Boolean(opts.onImageFlush);
     if (opts.showResources === false) {
       opts.log(`[resource] skipped (showResources=false, ${name})`);
-      return false;
+      return routesToImagePipeline;
     }
 
     if ("text" in resource) {
@@ -754,22 +899,9 @@ export class WeChatAcpClient implements acp.Client {
       return false;
     }
 
-    // Sanitized once here: the label feeds the placeholder, the logs, and
+    // Sanitized once above: the label feeds the placeholder, the logs, and
     // the value forwarded to the image pipeline.
-    const mime = sanitizeInlineLabel(resource.mimeType ?? "");
-    // Route into the image pipeline only when it can actually deliver:
-    // exact allow-listed base type (parameters stripped), images enabled,
-    // and a sink configured. Every miss path in maybeSendImage other than
-    // the oversized/failure placeholders is log-and-skip, which is fine
-    // for image content blocks but would silently drop a resource (and a
-    // resource-only turn would then trigger the empty-turn notice), so
-    // anything not deliverable falls through to the visible placeholder.
-    const baseMime = mime.split(";")[0].trim().toLowerCase();
-    if (
-      SUPPORTED_IMAGE_MIME_TYPES.has(baseMime) &&
-      opts.showImages !== false &&
-      opts.onImageFlush
-    ) {
+    if (routesToImagePipeline) {
       // Route through the image pipeline so an image handed back as an
       // embedded resource behaves exactly like an image content block.
       await this.maybeSendImage({ data: resource.blob, mimeType: baseMime }, turn);
