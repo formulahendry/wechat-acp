@@ -1295,3 +1295,159 @@ test("late old-turn notification queued after beginTurn cannot leak into the new
   );
   assert.deepEqual(turn2Messages, [], "turn 2 sinks must stay untouched");
 });
+
+// ---------------------------------------------------------------------------
+// Copilot CLI rawOutput resources (issue 62)
+// ---------------------------------------------------------------------------
+
+const BLOB_BASE64 = Buffer.from("COPILOT_RESOURCE_SENTINEL").toString("base64");
+
+test("Copilot CLI shape: resource only in rawOutput renders exactly once", async () => {
+  // Exact captured payload shape from Copilot CLI 1.0.73: an empty text
+  // content block, the full resource in rawOutput.contents, and a URI-less
+  // blob copy in rawOutput.binaryResultsForLlm.
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(
+    client,
+    {
+      content: "",
+      detailedContent: "",
+      contents: [
+        {
+          type: "resource",
+          resource: {
+            uri: "memory://copilot-resource-probe/payload.bin",
+            mimeType: "application/octet-stream",
+            blob: BLOB_BASE64,
+          },
+        },
+      ],
+      binaryResultsForLlm: [
+        { type: "resource", data: BLOB_BASE64, mimeType: "application/octet-stream" },
+      ],
+    },
+    [{ type: "content", content: { type: "text", text: "" } }],
+  );
+
+  const text = await client.flush();
+  const placeholders = text.match(/📎 \[resource: payload\.bin/g) ?? [];
+  assert.equal(placeholders.length, 1, "resource present in both rawOutput fields must render once");
+  assert.match(text, /application\/octet-stream, ~\d+ bytes\) - binary content not rendered\]/);
+  assert.equal(client.hasProducedMessage, true);
+});
+
+test("text resource in rawOutput.contents renders as a fenced block with its URI name", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    contents: [
+      {
+        type: "resource",
+        resource: { uri: "file:///notes.md", mimeType: "text/markdown", text: "# hi" },
+      },
+    ],
+  });
+
+  const text = await client.flush();
+  assert.match(text, /📎 notes\.md \(text\/markdown\)/);
+  assert.match(text, /```markdown\n# hi\n```/);
+});
+
+test("image resource in rawOutput.contents is delivered once despite a binaryResultsForLlm image copy", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    contents: [
+      {
+        type: "resource",
+        resource: { uri: "file:///chart.png", mimeType: "image/png", blob: PNG_BASE64 },
+      },
+    ],
+    binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }],
+  });
+
+  assert.equal(images.length, 1, "image must be delivered exactly once, not per rawOutput field");
+  assert.equal(images[0].data, PNG_BASE64);
+});
+
+test("binaryResultsForLlm resource entries are a fallback when rawOutput.contents is absent", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    binaryResultsForLlm: [
+      { type: "resource", data: BLOB_BASE64, mimeType: "application/octet-stream" },
+    ],
+  });
+
+  const text = await client.flush();
+  assert.match(
+    text,
+    /📎 \[resource: resource \(application\/octet-stream, ~\d+ bytes\) - binary content not rendered\]/,
+    "URI-less fallback entries render under the generic name",
+  );
+});
+
+test("standard resource content block suppresses rawOutput resource parsing", async () => {
+  const client = makeClient({});
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(
+    client,
+    {
+      contents: [
+        {
+          type: "resource",
+          resource: { uri: "file:///dup.txt", mimeType: "text/plain", text: "from rawOutput" },
+        },
+      ],
+    },
+    [
+      {
+        type: "content",
+        content: {
+          type: "resource",
+          resource: { uri: "file:///real.txt", mimeType: "text/plain", text: "from content block" },
+        },
+      },
+    ],
+  );
+
+  const text = await client.flush();
+  assert.match(text, /from content block/);
+  assert.doesNotMatch(text, /from rawOutput/, "rawOutput copy must not render when a standard block exists");
+});
+
+test("malformed rawOutput resource entries are ignored safely", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({ onImageFlush: async (img) => { images.push(img); } });
+  client.newTurn();
+
+  await emitToolCallRawOutputImage(client, {
+    contents: [
+      null,
+      "resource",
+      42,
+      { type: "resource" },
+      { type: "resource", resource: null },
+      { type: "resource", resource: { uri: 5 } },
+      { type: "resource", resource: { uri: "file:///x.bin", blob: "" } },
+      { type: "other", resource: { uri: "file:///y.txt", text: "nope" } },
+    ],
+    binaryResultsForLlm: [
+      { type: "resource" },
+      { type: "resource", data: "" },
+      { type: "resource", data: 7, mimeType: "application/octet-stream" },
+    ],
+  });
+
+  const text = await client.flush();
+  assert.equal(text, "", "no malformed entry may render anything");
+  assert.equal(images.length, 0);
+  assert.equal(client.hasProducedMessage, false);
+});
