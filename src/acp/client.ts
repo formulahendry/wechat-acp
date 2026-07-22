@@ -558,7 +558,7 @@ export class WeChatAcpClient implements acp.Client {
             rawOutputResources > 0 ? ` [resources: ${rawOutputResources} rawOutput fallback]` : "";
           const linkNote =
             rawOutputResourceLinks > 0
-              ? ` [resource links: ${rawOutputResourceLinks} rawOutput fallback]`
+              ? ` [resource link entries: ${rawOutputResourceLinks} rawOutput fallback]`
               : "";
           opts.log(
             `[tool] ${update.toolCallId} → ${update.status}${imageNote}${resourceNote}${linkNote}`,

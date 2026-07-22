@@ -124,7 +124,17 @@ export class SessionManager {
       if (session.mcpLease) closingLeases.push(session.mcpLease.close());
     }
     this.sessions.clear();
-    await Promise.all(closingLeases);
+    const results = await Promise.allSettled(closingLeases);
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult =>
+        result.status === "rejected",
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures.map((failure) => failure.reason),
+        "Failed to close session MCP leases",
+      );
+    }
   }
 
   async enqueue(userId: string, message: PendingMessage): Promise<void> {

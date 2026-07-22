@@ -1507,6 +1507,7 @@ const BLOB_BASE64 = Buffer.from("COPILOT_RESOURCE_SENTINEL").toString("base64");
 
 test("Copilot CLI rawOutput resource_link resolves and delivers a file", async () => {
   const files: AgentFile[] = [];
+  const logs: string[] = [];
   const client = makeClient({
     resolveResourceLink: async (link) => ({
       data: Buffer.from(`resolved:${link.uri}`).toString("base64"),
@@ -1515,6 +1516,9 @@ test("Copilot CLI rawOutput resource_link resolves and delivers a file", async (
     }),
     onFileFlush: async (file) => {
       files.push(file);
+    },
+    log: (message) => {
+      logs.push(message);
     },
   });
 
@@ -1540,6 +1544,11 @@ test("Copilot CLI rawOutput resource_link resolves and delivers a file", async (
   assert.equal(files.length, 1);
   assert.equal(files[0].name, "artifact.txt");
   assert.equal(files[0].mimeType, "text/plain");
+  assert.ok(
+    logs.some((message) =>
+      message.includes("[resource link entries: 1 rawOutput fallback]"),
+    ),
+  );
 });
 
 test("standard resource_link suppresses the mirrored rawOutput link", async () => {

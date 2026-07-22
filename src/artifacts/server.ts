@@ -196,7 +196,17 @@ async function closeLease(
     sessions.delete(sessionId);
     closing.push(session.mcp.close());
   }
-  await Promise.all(closing);
+  const results = await Promise.allSettled(closing);
+  const failures = results.filter(
+    (result): result is PromiseRejectedResult =>
+      result.status === "rejected",
+  );
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures.map((failure) => failure.reason),
+      "Failed to close artifact MCP lease",
+    );
+  }
 }
 
 function bearerToken(authorization: string | undefined): string | null {
