@@ -1089,6 +1089,49 @@ test("showResources=false does not resolve or deliver resource links", async () 
   assert.equal(await client.flush(), "");
 });
 
+test("hidden image resource_link suppresses the mirrored rawOutput image fallback", async () => {
+  let resolverCalls = 0;
+  const images: AgentImage[] = [];
+  const client = makeClient({
+    showResources: false,
+    resolveResourceLink: async () => {
+      resolverCalls++;
+      return {
+        data: PNG_BASE64,
+        name: "hidden.png",
+        mimeType: "image/png",
+      };
+    },
+    onImageFlush: async (image) => {
+      images.push(image);
+    },
+  });
+
+  await emitToolCallRawOutputImage(
+    client,
+    {
+      binaryResultsForLlm: [
+        { type: "image", data: PNG_BASE64, mimeType: "image/png" },
+      ],
+    },
+    [
+      {
+        type: "content",
+        content: {
+          type: "resource_link",
+          uri: "wechat-acp://artifact/hidden-image",
+          name: "hidden.png",
+          mimeType: "image/png",
+        },
+      },
+    ],
+  );
+
+  assert.equal(resolverCalls, 0);
+  assert.equal(images.length, 0, "the mirrored rawOutput image must not bypass showResources=false");
+  assert.equal(await client.flush(), "");
+});
+
 test("showResources=false drops resources without rendering", async () => {
   const images: AgentImage[] = [];
   const client = makeClient({

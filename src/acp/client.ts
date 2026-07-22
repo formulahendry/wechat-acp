@@ -824,9 +824,17 @@ export class WeChatAcpClient implements acp.Client {
   ): Promise<boolean> {
     const opts = turn.opts;
     const name = sanitizeInlineLabel(link.name ?? resourceDisplayName(link.uri));
+    const mimeType = sanitizeInlineLabel(link.mimeType ?? "")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
+    const routesToImagePipeline =
+      SUPPORTED_IMAGE_MIME_TYPES.has(mimeType) &&
+      opts.showImages !== false &&
+      Boolean(opts.onImageFlush);
     if (opts.showResources === false) {
       opts.log(`[resource-link] skipped (showResources=false, ${name})`);
-      return false;
+      return routesToImagePipeline;
     }
     if (turn.deliveredResourceLinks.has(link.uri)) {
       opts.log(`[resource-link] skipped duplicate: ${name}`);
@@ -858,6 +866,10 @@ export class WeChatAcpClient implements acp.Client {
     }
   }
 
+  /**
+   * Deliver a resolved file and return whether it was routed through the
+   * native image pipeline. A successful generic file delivery returns false.
+   */
   private async maybeSendFile(file: AgentFile, turn: TurnState): Promise<boolean> {
     const opts = turn.opts;
     const name = sanitizeInlineLabel(file.name) || "artifact";
