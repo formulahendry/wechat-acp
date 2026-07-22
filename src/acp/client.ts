@@ -564,8 +564,8 @@ export class WeChatAcpClient implements acp.Client {
           const imageNote =
             imageContentBlocks + resourceImages + resourceLinkImages > 0
               ? ` [images: ${imageContentBlocks + resourceImages + resourceLinkImages} content block]`
-              : rawOutputImages + rawOutputResourceLinkImages > 0
-                ? ` [images: ${rawOutputImages + rawOutputResourceLinkImages} rawOutput fallback]`
+              : rawOutputImages + rawOutputResourceImages + rawOutputResourceLinkImages > 0
+                ? ` [images: ${rawOutputImages + rawOutputResourceImages + rawOutputResourceLinkImages} rawOutput fallback]`
                 : "";
           const resourceNote =
             rawOutputResources > 0 ? ` [resources: ${rawOutputResources} rawOutput fallback]` : "";

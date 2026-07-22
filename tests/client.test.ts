@@ -429,13 +429,26 @@ test("[tool] log line reports image source: content block vs rawOutput fallback"
   await emitToolCallRawOutputImage(client, {
     binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }],
   });
+  await emitToolCallRawOutputImage(client, {
+    contents: [
+      {
+        type: "resource",
+        resource: {
+          uri: "file:///workspace/raw-output-resource.png",
+          blob: PNG_BASE64,
+          mimeType: "image/png",
+        },
+      },
+    ],
+  });
   await emitToolCallRawOutputImage(client, { content: "plain text result" });
 
   const toolLogs = logs.filter((l) => l.startsWith("[tool] tc-"));
-  assert.equal(toolLogs.length, 3);
+  assert.equal(toolLogs.length, 4);
   assert.match(toolLogs[0], /\[images: 1 content block\]$/);
   assert.match(toolLogs[1], /\[images: 1 rawOutput fallback\]$/);
-  assert.match(toolLogs[2], /completed$/, "no image note when the tool produced no image");
+  assert.match(toolLogs[2], /\[images: 1 rawOutput fallback\] \[resources: 1 rawOutput fallback\]$/);
+  assert.match(toolLogs[3], /completed$/, "no image note when the tool produced no image");
 });
 
 test("image in agent_message_chunk is delivered", async () => {
