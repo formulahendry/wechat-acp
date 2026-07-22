@@ -219,7 +219,12 @@ export class ArtifactStore {
 export function sanitizeFileName(name: string): string {
   const sanitized = path
     .basename(name)
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    // Strip controls that can create new lines or alter bidirectional rendering.
+    .replace(
+      /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g,
+      " ",
+    )
+    .replace(/\s+/g, " ")
     .trim()
     .slice(0, 255);
   return sanitized || "artifact";

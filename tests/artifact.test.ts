@@ -8,7 +8,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 import { startArtifactMcpServer } from "../src/artifacts/server.js";
-import { ArtifactStore } from "../src/artifacts/store.js";
+import {
+  ArtifactStore,
+  sanitizeFileName,
+} from "../src/artifacts/store.js";
 
 async function withTempDir(
   run: (dir: string) => Promise<void>,
@@ -20,6 +23,15 @@ async function withTempDir(
     await fs.rm(dir, { recursive: true, force: true });
   }
 }
+
+test("sanitizeFileName strips line and bidirectional controls", () => {
+  assert.equal(
+    sanitizeFileName(
+      "  report\u2028\t\u202Eevil\u2069  \u061C\u200F.pdf  ",
+    ),
+    "report evil .pdf",
+  );
+});
 
 test("ArtifactStore snapshots allowed files and consumes artifacts once", async () => {
   await withTempDir(async (dir) => {
