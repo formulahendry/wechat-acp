@@ -15,7 +15,10 @@ import {
   type AgentAudio,
   type AgentFile,
 } from "../src/acp/client.js";
-import type { AgentResourceLink } from "../src/artifacts/types.js";
+import {
+  MAX_AGENT_FILE_BYTES,
+  type AgentResourceLink,
+} from "../src/artifacts/types.js";
 import { splitText } from "../src/weixin/send.js";
 
 // ---------------------------------------------------------------------------
@@ -838,6 +841,26 @@ test("non-image blob resource is delivered through the generic file pipeline", a
   ]);
   assert.equal(await client.flush(), "");
   assert.equal(client.hasProducedMessage, true);
+});
+
+test("file exactly at the decoded size limit is delivered despite base64 padding", async () => {
+  let delivered = false;
+  const encodedLength = 4 * Math.ceil(MAX_AGENT_FILE_BYTES / 3);
+  const data = `${"A".repeat(encodedLength - 2)}==`;
+  const client = makeClient({
+    onFileFlush: async () => {
+      delivered = true;
+    },
+  });
+
+  await emitToolCallResource(client, {
+    uri: "file:///limit.bin",
+    mimeType: "application/octet-stream",
+    blob: data,
+  });
+
+  assert.equal(delivered, true);
+  assert.equal(await client.flush(), "");
 });
 
 test("resource_link in agent_message_chunk resolves and delivers a file", async () => {

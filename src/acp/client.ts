@@ -122,6 +122,11 @@ function sanitizeInlineLabel(value: string): string {
     : collapsed;
 }
 
+function decodedBase64ByteLength(data: string): number {
+  const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((data.length * 3) / 4) - padding);
+}
+
 /**
  * Human-readable name for a resource: the last path segment of its URI,
  * percent-decoded and sanitized to a single line. Falls back to the full
@@ -854,12 +859,12 @@ export class WeChatAcpClient implements acp.Client {
       return;
     }
 
-    const approxBytes = Math.ceil(file.data.length / 4) * 3;
-    if (approxBytes > MAX_AGENT_FILE_BYTES) {
+    const decodedBytes = decodedBase64ByteLength(file.data);
+    if (decodedBytes > MAX_AGENT_FILE_BYTES) {
       turn.chunks.push(`\n⚠️ [file ${name} is too large to deliver]\n`);
       turn.producedMessage = true;
       opts.log(
-        `[file] skipped oversized file ${name} (~${approxBytes} bytes > ${MAX_AGENT_FILE_BYTES})`,
+        `[file] skipped oversized file ${name} (${decodedBytes} bytes > ${MAX_AGENT_FILE_BYTES})`,
       );
       return;
     }
@@ -867,7 +872,7 @@ export class WeChatAcpClient implements acp.Client {
     await this.maybeFlushMessage(turn);
     try {
       await opts.onFileFlush({ data: file.data, name, mimeType });
-      opts.log(`[file] sent ${name} (${mimeType}, ~${approxBytes} bytes)`);
+      opts.log(`[file] sent ${name} (${mimeType}, ${decodedBytes} bytes)`);
       turn.producedMessage = true;
     } catch (err) {
       turn.chunks.push(`\n⚠️ [file ${name} could not be delivered]\n`);
