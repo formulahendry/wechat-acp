@@ -32,6 +32,7 @@ import { trackEvent, trackException, hashUserId } from "./telemetry/index.js";
 
 const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
 const ACP_CANCEL_COMMAND = BRIDGE_COMMANDS.acpCancel;
+const ACP_NEW_COMMAND = BRIDGE_COMMANDS.acpNew;
 const BUFFER_START_COMMAND = BRIDGE_COMMANDS.promptStart;
 const BUFFER_DONE_COMMAND = BRIDGE_COMMANDS.promptDone;
 const BUFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -275,6 +276,15 @@ export class WeChatAcpBridge {
       return;
     }
 
+    const acpNewCommand = this.extractAcpNewCommand(msg);
+    if (acpNewCommand) {
+      this.handleAcpNewCommand(acpNewCommand, userId, contextToken).catch((err) => {
+        this.log(`Failed to handle ACP new command from ${userId}: ${String(err)}`);
+        trackException(err, "command", hashUserId(userId));
+      });
+      return;
+    }
+
     // /acp-prompt-start — enter buffering mode
     if (this.isBufferStartCommand(msg)) {
       this.handleBufferStart(userId, contextToken);
@@ -445,6 +455,70 @@ export class WeChatAcpBridge {
 
     await this.sendReply(userId, contextToken, this.formatAcpCancelResult(result, drainQueue));
   }
+
+  private async handleAcpNewCommand(
+    command: string,
+    userId: string,
+    contextToken: string,
+  ): Promise<void> {
+    const args = command.trim().split(/\s+/);
+    if (args.length > 1) {
+      await this.sendReply(userId, contextToken,
+        `⚠️ ${ACP_NEW_COMMAND} takes no arguments.\n\nJust send ${ACP_NEW_COMMAND}${this.aliasHint(ACP_NEW_COMMAND)} to end the current session. A new session will be created on your next message.`);
+      return;
+    }
+
+    if (!this.sessionManager) {
+      await this.sendReply(userId, contextToken, "Bridge is not ready yet.");
+      return;
+    }
+
+    // Clear multi-part message buffer if the user is in buffering mode
+    if (this.messageBuffers.has(userId)) {
+      this.messageBuffers.delete(userId);
+      this.clearBufferTimer(userId);
+    }
+
+    // If a buffer flush is already in progress, don't drop the tracking entry.
+    // Let the flush enqueue first, then immediately kill the session so the
+    // flushed content (and any queued work) is discarded and doesn't spawn a
+    // brand-new session after the reset.
+    const flushPromise = this.bufferFlushing.get(userId);
+    if (flushPromise) {
+      const hadSession = !!this.sessionManager.getSession(userId);
+      flushPromise.finally(() => {
+        this.sessionManager?.killSession(userId, "user-requested-reset");
+      });
+      trackEvent(
+        "command.acp_new",
+        { userIdHash: hashUserId(userId), hadSession, delayedUntilFlush: true },
+        hashUserId(userId),
+      );
+      await this.sendReply(
+        userId,
+        contextToken,
+        "🔄 Reset requested. I’ll end the session as soon as the current buffer flush finishes. Your next message will start a fresh session.",
+      );
+      return;
+    }
+
+    // No in-progress flush: kill immediately.
+    this.bufferFlushing.delete(userId);
+
+    const killed = this.sessionManager.killSession(userId, "user-requested-reset");
+    trackEvent(
+      "command.acp_new",
+      { userIdHash: hashUserId(userId), hadSession: killed, delayedUntilFlush: false },
+      hashUserId(userId),
+    );
+
+    if (killed) {
+      await this.sendReply(userId, contextToken,
+        `🔄 Agent session ended. Your next message will start a fresh session.`);
+    } else {
+      await this.sendReply(userId, contextToken,
+        `ℹ️ No active session to reset. A new session will be created on your next message.`);
+    }
 
   private formatAcpCancelResult(
     result: { cancelledTurn: boolean; droppedQueueCount: number },
@@ -1015,6 +1089,10 @@ export class WeChatAcpBridge {
 
   private extractAcpCancelCommand(msg: WeixinMessage): string | null {
     return this.extractBridgeCommand(msg, ACP_CANCEL_COMMAND);
+  }
+
+  private extractAcpNewCommand(msg: WeixinMessage): string | null {
+    return this.extractBridgeCommand(msg, ACP_NEW_COMMAND);
   }
 
   private extractBridgeCommand(msg: WeixinMessage, canonical: string): string | null {

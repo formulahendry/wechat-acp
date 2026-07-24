@@ -32,6 +32,7 @@ export type EventName =
   | "command.acp_config.view"
   | "command.acp_config.set"
   | "command.acp_cancel"
+  | "command.acp_new"
   | "command.buffer_start"
   | "command.buffer_done"
   | "session.created"

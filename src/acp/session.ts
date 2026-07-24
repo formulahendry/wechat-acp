@@ -244,6 +244,22 @@ export class SessionManager {
     return { cancelledTurn: true, droppedQueueCount };
   }
 
+  /**
+   * Kill the agent subprocess for a user and remove the session slot.
+   * Queued messages are rejected. The next `enqueue()` call for this user
+   * will spawn a fresh agent and ACP session.
+   */
+  killSession(userId: string, reason: string): boolean {
+    const session = this.sessions.get(userId);
+    if (!session) return false;
+
+    this.opts.log(`Killing session for ${userId}: ${reason}`);
+    this.rejectQueuedCompletions(session, new Error(`Session killed: ${reason}`));
+    killAgent(session.agentInfo.process);
+    this.sessions.delete(userId);
+    return true;
+  }
+
   get activeCount(): number {
     return this.sessions.size;
   }
