@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add `/acp-more` to re-deliver text segments that iLink rejected after normal
+  retries. Pending segments expire after 10 minutes, drain in order on the
+  existing per-user send chain, stop on the first persistent fetch failure, and
+  are cleared by a newer real agent prompt. The command and aliases such as
+  `"/acp-fetch-msg"` or `"."` are intercepted without creating an ACP turn.
+  This covers reported text send failures only; successful sends that iLink
+  silently drops cannot be detected. Fixes #45.
 - Add opt-in ACP session persistence across bridge restarts. Configure
   `session.resume` or pass `--session-resume <off|auto|required>`. The bridge
   checks the agent's advertised `loadSession` capability at runtime, restores

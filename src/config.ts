@@ -103,6 +103,7 @@ export const BUILT_IN_AGENTS: Record<string, AgentPreset> = {
 export const BRIDGE_COMMANDS = {
   acpConfig: "/acp-config",
   acpCancel: "/acp-cancel",
+  acpMore: "/acp-more",
   promptStart: "/acp-prompt-start",
   promptDone: "/acp-prompt-done",
 } as const;
@@ -364,6 +365,21 @@ export function resolveCommandNames(
   aliases?: Record<string, string[]>,
 ): string[] {
   return [canonical, ...resolveCommandAliases(canonical, aliases).filter((a) => a !== canonical)];
+}
+
+export function matchBridgeCommand(
+  text: string,
+  canonical: string,
+  aliases?: Record<string, string[]>,
+): string | null {
+  const trimmed = text.trim();
+  for (const name of resolveCommandNames(canonical, aliases)) {
+    if (trimmed === name) return canonical;
+    if (name.startsWith("/") && trimmed.startsWith(`${name} `)) {
+      return canonical + trimmed.slice(name.length);
+    }
+  }
+  return null;
 }
 
 /**

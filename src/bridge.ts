@@ -27,9 +27,10 @@ import type { WeChatAcpConfig } from "./config.js";
 import {
   BRIDGE_COMMANDS,
   buildAgentSessionScope,
+  matchBridgeCommand,
   resolveCommandAliases,
-  resolveCommandNames,
 } from "./config.js";
+import { drainPendingText, PendingTextRegistry } from "./pending-text.js";
 import { InjectionMonitor } from "./inject/monitor.js";
 import type { InjectedMessage } from "./inject/types.js";
 import {
@@ -43,10 +44,13 @@ import { trackEvent, trackException, hashUserId } from "./telemetry/index.js";
 
 const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
 const ACP_CANCEL_COMMAND = BRIDGE_COMMANDS.acpCancel;
+const ACP_MORE_COMMAND = BRIDGE_COMMANDS.acpMore;
 const BUFFER_START_COMMAND = BRIDGE_COMMANDS.promptStart;
 const BUFFER_DONE_COMMAND = BRIDGE_COMMANDS.promptDone;
 const BUFFER_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const BUFFER_MAX_BLOCKS = 50;
+const PENDING_TEXT_TTL_MS = 10 * 60 * 1000;
+const PENDING_TEXT_MAX_SEGMENTS = 50;
 const SEGMENT_SEND_MAX_ATTEMPTS = 3;
 const SEGMENT_SEND_RETRY_BASE_MS = 300;
 
@@ -77,6 +81,7 @@ export class WeChatAcpBridge {
   // (e.g. a command reply racing an active session flush) cannot interleave
   // their segments and arrive out of order (issue #38).
   private sendChains = new Map<string, Promise<void>>();
+  private pendingText: PendingTextRegistry;
   // Per-user message buffer for /acp-prompt-start.../acp-prompt-done multi-part compose
   private messageBuffers = new Map<string, {
     blocks: acp.ContentBlock[];
@@ -96,6 +101,11 @@ export class WeChatAcpBridge {
   constructor(config: WeChatAcpConfig, log?: (msg: string) => void) {
     this.config = config;
     this.log = log ?? ((msg: string) => console.log(`[wechat-acp] ${msg}`));
+    this.pendingText = new PendingTextRegistry({
+      ttlMs: PENDING_TEXT_TTL_MS,
+      maxUsers: Math.max(1, config.session.maxConcurrentUsers),
+      maxSegmentsPerUser: PENDING_TEXT_MAX_SEGMENTS,
+    });
   }
 
   async start(opts?: {
@@ -199,7 +209,7 @@ export class WeChatAcpBridge {
           ? () => this.artifactMcpServer!.createLease()
           : undefined,
         log: this.log,
-        onReply: (userId, contextToken, text) => this.sendReply(userId, contextToken, text),
+        onReply: (userId, contextToken, text) => this.sendAgentReply(userId, contextToken, text),
         onReplyImage: (userId, contextToken, image) => this.sendImageReply(userId, contextToken, image),
         onReplyAudio: (userId, contextToken, audio) => this.sendAudioReply(userId, contextToken, audio),
         onReplyFile: (userId, contextToken, file) => this.sendFileReply(userId, contextToken, file),
@@ -228,7 +238,12 @@ export class WeChatAcpBridge {
         storageDir: this.config.storage.dir,
         abortSignal: this.abortController.signal,
         log: this.log,
-        onMessage: (msg) => this.handleMessage(msg),
+        onMessage: (msg) => {
+          this.handleMessage(msg).catch((err) => {
+            this.log(`Failed to handle message: ${String(err)}`);
+            trackException(err, "message");
+          });
+        },
       });
     } catch (err) {
       try {
@@ -274,7 +289,7 @@ export class WeChatAcpBridge {
     }
   }
 
-  private handleMessage(msg: WeixinMessage): void {
+  async handleMessage(msg: WeixinMessage): Promise<void> {
     // Only process user messages (not bot's own messages)
     if (msg.message_type !== MessageType.USER) return;
 
@@ -299,19 +314,18 @@ export class WeChatAcpBridge {
 
     const acpConfigCommand = this.extractAcpConfigCommand(msg);
     if (acpConfigCommand) {
-      this.handleAcpConfigCommand(acpConfigCommand, userId, contextToken).catch((err) => {
-        this.log(`Failed to handle ACP config command from ${userId}: ${String(err)}`);
-        trackException(err, "command", hashUserId(userId));
-      });
+      await this.handleAcpConfigCommand(acpConfigCommand, userId, contextToken);
       return;
     }
 
     const acpCancelCommand = this.extractAcpCancelCommand(msg);
     if (acpCancelCommand) {
-      this.handleAcpCancelCommand(acpCancelCommand, userId, contextToken).catch((err) => {
-        this.log(`Failed to handle ACP cancel command from ${userId}: ${String(err)}`);
-        trackException(err, "command", hashUserId(userId));
-      });
+      await this.handleAcpCancelCommand(acpCancelCommand, userId, contextToken);
+      return;
+    }
+
+    if (this.extractBridgeCommand(msg, ACP_MORE_COMMAND)) {
+      await this.handleAcpMoreCommand(userId, contextToken);
       return;
     }
 
@@ -323,10 +337,7 @@ export class WeChatAcpBridge {
 
     // /acp-prompt-done — flush buffer and send to agent
     if (this.isBufferDoneCommand(msg)) {
-      this.handleBufferDone(userId, contextToken).catch((err) => {
-        this.log(`Failed to flush message buffer for ${userId}: ${String(err)}`);
-        trackException(err, "buffer", hashUserId(userId));
-      });
+      await this.handleBufferDone(userId, contextToken);
       return;
     }
 
@@ -336,18 +347,14 @@ export class WeChatAcpBridge {
       return;
     }
 
-    // Convert and enqueue — fire-and-forget (don't block the poll loop)
+    this.beginAgentPrompt(userId, contextToken);
     const waitForFlush = this.bufferFlushing.get(userId);
-    const enqueue = waitForFlush
+    await (waitForFlush
       ? waitForFlush.then(() => this.enqueueMessage(msg, userId, contextToken))
-      : this.enqueueMessage(msg, userId, contextToken);
-    enqueue.catch((err) => {
-      this.log(`Failed to enqueue message from ${userId}: ${String(err)}`);
-      trackException(err, "enqueue", hashUserId(userId));
-    });
+      : this.enqueueMessage(msg, userId, contextToken));
   }
 
-  private async enqueueMessage(
+  protected async enqueueMessage(
     msg: WeixinMessage,
     userId: string,
     contextToken: string,
@@ -368,6 +375,7 @@ export class WeChatAcpBridge {
     }
 
     const target = await resolveUserTarget(this.config.storage.stateFile, job.target, job.contextToken);
+    this.beginAgentPrompt(target.userId, target.contextToken);
     const prompt: acp.ContentBlock[] = [{ type: "text", text: job.text }];
     this.log(`[inject] enqueue ${job.id} for ${target.userId}`);
     trackEvent(
@@ -486,6 +494,30 @@ export class WeChatAcpBridge {
     await this.sendReply(userId, contextToken, this.formatAcpCancelResult(result, drainQueue));
   }
 
+  protected async handleAcpMoreCommand(userId: string, contextToken: string): Promise<void> {
+    return this.queueSendTask(userId, async () => {
+      const result = await drainPendingText(
+        this.pendingText,
+        userId,
+        (segment) => this.sendTextSegment(userId, contextToken, segment),
+      );
+      trackEvent(
+        "command.acp_more",
+        {
+          userIdHash: hashUserId(userId),
+          pendingCount: result.pendingCount,
+          sentCount: result.sentCount,
+          remainingCount: result.remainingCount,
+        },
+        hashUserId(userId),
+      );
+      if (result.pendingCount === 0) {
+        await this.sendTextSegment(userId, contextToken, "No pending messages right now.");
+      }
+      this.cancelTypingIndicator(userId, contextToken).catch(() => {});
+    });
+  }
+
   private formatAcpCancelResult(
     result: { cancelledTurn: boolean; droppedQueueCount: number },
     drainQueue: boolean,
@@ -553,6 +585,8 @@ export class WeChatAcpBridge {
     if (!buffer) {
       return this.sendReply(userId, contextToken, `⚠️ Nothing buffered. Send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} first, then send messages before ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)}.`);
     }
+
+    this.beginAgentPrompt(userId, buffer.contextToken);
 
     // Remove from map immediately so new messages during the await
     // are not appended to a stale buffer.
@@ -706,68 +740,58 @@ export class WeChatAcpBridge {
     // that segments from separate sendReply calls cannot interleave (issue #38).
     // The stored link swallows errors so one failed reply doesn't break the
     // chain for the next caller, while the returned promise still propagates.
-    const previous = this.sendChains.get(userId) ?? Promise.resolve();
-    const current = previous
-      .catch(() => {})
-      .then(() => this.deliverReply(userId, contextToken, text));
-    this.sendChains.set(
-      userId,
-      current.catch(() => {}),
+    return this.queueSendTask(userId, () => this.deliverReply(userId, contextToken, text));
+  }
+
+  protected beginAgentPrompt(userId: string, contextToken: string): void {
+    this.pendingText.supersede(userId, contextToken);
+  }
+
+  protected async sendAgentReply(
+    userId: string,
+    contextToken: string,
+    text: string,
+  ): Promise<void> {
+    const generation = this.pendingText.generationForContext(userId, contextToken);
+    return this.queueSendTask(userId, () =>
+      this.deliverReply(userId, contextToken, text, generation),
     );
+  }
+
+  private queueSendTask(userId: string, task: () => Promise<void>): Promise<void> {
+    const previous = this.sendChains.get(userId) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(task);
+    this.sendChains.set(userId, current.catch(() => {}));
     return current;
   }
 
-  private async deliverReply(userId: string, contextToken: string, text: string): Promise<void> {
+  private async deliverReply(
+    userId: string,
+    contextToken: string,
+    text: string,
+    generation?: number,
+  ): Promise<void> {
     const segments = splitText(text, TEXT_CHUNK_LIMIT);
     const startedAt = Date.now();
     let segmentsSent = 0;
-    let anyFailed = false;
+    const failedSegments: string[] = [];
 
     for (const segment of segments) {
-      // Generate one stable idempotency key per segment *before* the retry
-      // loop so that all attempts for the same segment reuse the same
-      // client_id. The iLink gateway de-duplicates by client_id, so a retry
-      // after a transient hard error (connection reset, 5xx) will not produce
-      // a duplicate message even if the first attempt was already received.
-      const segmentClientId = `wechat-acp-${crypto.randomUUID()}`;
-      let sent = false;
-
-      for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
-        try {
-          await this.paceConsecutiveSend(userId);
-          await sendTextMessage(
-            userId,
-            segment,
-            {
-              baseUrl: this.tokenData!.baseUrl,
-              token: this.tokenData!.token,
-              contextToken,
-            },
-            segmentClientId,
-          );
-          sent = true;
-          break;
-        } catch (err) {
-          trackException(err, "reply.segment", hashUserId(userId));
-          if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
-            await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));
-          }
-        }
-      }
-
-      if (sent) {
+      if (await this.sendTextSegment(userId, contextToken, segment)) {
         segmentsSent++;
       } else {
-        // Log the drop but continue — a single failed segment must not
-        // prevent the remaining segments from being delivered.
-        anyFailed = true;
+        failedSegments.push(segment);
       }
     }
 
-    if (anyFailed) {
+    if (generation !== undefined) {
+      this.pendingText.recordFailures(userId, generation, failedSegments);
+    }
+
+    if (failedSegments.length > 0) {
       trackException(
         new Error(
-          `deliverReply: ${segments.length - segmentsSent}/${segments.length} segment(s) failed to send after retries`,
+          `deliverReply: ${failedSegments.length}/${segments.length} segment(s) failed to send after retries`,
         ),
         "reply",
         hashUserId(userId),
@@ -790,18 +814,40 @@ export class WeChatAcpBridge {
     this.cancelTypingIndicator(userId, contextToken).catch(() => {});
   }
 
+  protected async sendTextSegment(
+    userId: string,
+    contextToken: string,
+    segment: string,
+  ): Promise<boolean> {
+    const segmentClientId = `wechat-acp-${crypto.randomUUID()}`;
+    for (let attempt = 1; attempt <= SEGMENT_SEND_MAX_ATTEMPTS; attempt++) {
+      try {
+        await this.paceConsecutiveSend(userId);
+        await sendTextMessage(
+          userId,
+          segment,
+          {
+            baseUrl: this.tokenData!.baseUrl,
+            token: this.tokenData!.token,
+            contextToken,
+          },
+          segmentClientId,
+        );
+        return true;
+      } catch (err) {
+        trackException(err, "reply.segment", hashUserId(userId));
+        if (attempt < SEGMENT_SEND_MAX_ATTEMPTS) {
+          await new Promise((r) => setTimeout(r, SEGMENT_SEND_RETRY_BASE_MS * attempt));
+        }
+      }
+    }
+    return false;
+  }
+
   private async sendImageReply(userId: string, contextToken: string, image: AgentImage): Promise<void> {
     // Ride the same per-user chain as text replies so an image cannot
     // interleave with the segments of a concurrent text reply.
-    const previous = this.sendChains.get(userId) ?? Promise.resolve();
-    const current = previous
-      .catch(() => {})
-      .then(() => this.deliverImage(userId, contextToken, image));
-    this.sendChains.set(
-      userId,
-      current.catch(() => {}),
-    );
-    return current;
+    return this.queueSendTask(userId, () => this.deliverImage(userId, contextToken, image));
   }
 
   private async deliverImage(userId: string, contextToken: string, image: AgentImage): Promise<void> {
@@ -883,15 +929,9 @@ export class WeChatAcpBridge {
   ): Promise<void> {
     // Ride the same per-user chain as text and image replies so a file cannot
     // interleave with the segments of a concurrent reply.
-    const previous = this.sendChains.get(userId) ?? Promise.resolve();
-    const current = previous
-      .catch(() => {})
-      .then(() => this.deliverFile(userId, contextToken, file, telemetryKind));
-    this.sendChains.set(
-      userId,
-      current.catch(() => {}),
+    return this.queueSendTask(userId, () =>
+      this.deliverFile(userId, contextToken, file, telemetryKind),
     );
-    return current;
   }
 
   private async deliverFile(
@@ -1070,22 +1110,7 @@ export class WeChatAcpBridge {
     const item = items[0];
     if (item?.type !== 1 || !item.text_item?.text) return null;
 
-    const text = item.text_item.text.trim();
-    const names = resolveCommandNames(canonical, this.config.commandAliases);
-    for (const name of names) {
-      // Exact match → normalize to the canonical command with no arguments.
-      // This is the only matching mode for bare-phrase aliases (no leading
-      // "/"), e.g. a voice-transcribed "取消", which must match the whole
-      // message to avoid false positives.
-      if (text === name) return canonical;
-      // Slash-prefixed names (the canonical command and "/"-style aliases)
-      // also support trailing arguments. Replace the matched name with the
-      // canonical command so handlers always see a single, stable token.
-      if (name.startsWith("/") && text.startsWith(`${name} `)) {
-        return canonical + text.slice(name.length);
-      }
-    }
-    return null;
+    return matchBridgeCommand(item.text_item.text, canonical, this.config.commandAliases);
   }
 
   /**
