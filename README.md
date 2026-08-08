@@ -101,6 +101,7 @@ Options:
 - `--instance <name>`: run as a named, isolated instance. See "Running multiple instances" below.
 - `--idle-timeout <minutes>`: session idle timeout, default `1440` (use `0` for unlimited)
 - `--max-sessions <count>`: maximum concurrent user sessions, default `10`
+- `--turn-end-message <text>`: send a standalone message after each completed agent turn (default: disabled)
 - `--inbox-dir <dir>`: directory where received binary files are saved (default: `<storage.dir>/inbox`). The agent sees the absolute saved path in the prompt and can read the file directly.
 - `--no-inbox`: do not save received files; the agent only sees a size notice.
 - `--hide-thoughts`: do not forward agent thinking to WeChat (default: forwarded)
@@ -161,10 +162,19 @@ Example:
   },
   "session": {
     "idleTimeoutMs": 86400000,
-    "maxConcurrentUsers": 10
+    "maxConcurrentUsers": 10,
+    "turnEndMessage": "✅ Turn complete"
   }
 }
 ```
+
+`session.turnEndMessage` is optional. When set to a non-empty string, the
+bridge sends it as a standalone WeChat message after the ACP prompt resolves
+and all output from that turn has been delivered. This makes the real turn
+boundary visible even when the agent streamed several earlier messages or was
+silent during a long-running tool call. The bridge generates this signal, so it
+does not depend on the model following a prompt instruction. The
+`--turn-end-message` CLI option overrides the config file value.
 
 You can also override or add agent presets:
 

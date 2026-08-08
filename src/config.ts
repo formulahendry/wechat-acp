@@ -151,6 +151,11 @@ export interface WeChatAcpConfig {
   session: {
     idleTimeoutMs: number;
     maxConcurrentUsers: number;
+    /**
+     * Optional standalone message sent after an ACP prompt turn completes.
+     * Omit or set to an empty string to disable the completion indicator.
+     */
+    turnEndMessage?: string;
   };
   daemon: {
     enabled: boolean;

@@ -120,3 +120,132 @@ test("SessionManager.stop waits for every MCP lease before reporting failures", 
     "second-finished",
   ]);
 });
+
+function makeTurnSession(opts: {
+  flushText: string;
+  producedMessage: boolean;
+  events: string[];
+}): UserSession {
+  return {
+    userId: "user-1",
+    contextToken: "initial-context",
+    client: {
+      beginTurn: async () => {
+        opts.events.push("begin");
+      },
+      flush: async () => {
+        opts.events.push("flush");
+        return opts.flushText;
+      },
+      hasProducedMessage: opts.producedMessage,
+    } as never,
+    agentInfo: {
+      process: { killed: false, exitCode: null } as never,
+      connection: {
+        prompt: async () => {
+          opts.events.push("prompt");
+          return { stopReason: "end_turn" };
+        },
+      } as never,
+      sessionId: "session-1",
+      configOptions: [],
+    },
+    configOptions: [],
+    queue: [{ prompt: [], contextToken: "turn-context" }],
+    processing: true,
+    lastActivity: Date.now(),
+    createdAt: Date.now(),
+  };
+}
+
+test("configured turn end message is sent standalone after final buffered text", async () => {
+  const events: string[] = [];
+  const manager = new SessionManager({
+    agentCommand: "unused",
+    agentArgs: [],
+    agentCwd: process.cwd(),
+    idleTimeoutMs: 0,
+    maxConcurrentUsers: 1,
+    turnEndMessage: "✅ Turn complete",
+    showThoughts: false,
+    log: () => {},
+    onReply: async (_userId, _contextToken, text) => {
+      events.push(`reply:${text}`);
+    },
+    sendTyping: async () => {},
+  });
+  const session = makeTurnSession({
+    flushText: "Final answer",
+    producedMessage: true,
+    events,
+  });
+
+  await (
+    manager as unknown as { processQueue(session: UserSession): Promise<void> }
+  ).processQueue(session);
+
+  assert.deepEqual(events, [
+    "begin",
+    "prompt",
+    "flush",
+    "reply:Final answer",
+    "reply:✅ Turn complete",
+  ]);
+});
+
+test("configured turn end message is sent when all agent text was already streamed", async () => {
+  const replies: string[] = [];
+  const manager = new SessionManager({
+    agentCommand: "unused",
+    agentArgs: [],
+    agentCwd: process.cwd(),
+    idleTimeoutMs: 0,
+    maxConcurrentUsers: 1,
+    turnEndMessage: "Done",
+    showThoughts: false,
+    log: () => {},
+    onReply: async (_userId, _contextToken, text) => {
+      replies.push(text);
+    },
+    sendTyping: async () => {},
+  });
+  const session = makeTurnSession({
+    flushText: "",
+    producedMessage: true,
+    events: [],
+  });
+
+  await (
+    manager as unknown as { processQueue(session: UserSession): Promise<void> }
+  ).processQueue(session);
+
+  assert.deepEqual(replies, ["Done"]);
+});
+
+test("turn end message remains disabled when it is not configured", async () => {
+  const replies: string[] = [];
+  const manager = new SessionManager({
+    agentCommand: "unused",
+    agentArgs: [],
+    agentCwd: process.cwd(),
+    idleTimeoutMs: 0,
+    maxConcurrentUsers: 1,
+    showThoughts: false,
+    log: () => {},
+    onReply: async (_userId, _contextToken, text) => {
+      replies.push(text);
+    },
+    sendTyping: async () => {},
+  });
+  const session = makeTurnSession({
+    flushText: "Final answer",
+    producedMessage: true,
+    events: [],
+  });
+
+  await (
+    manager as unknown as { processQueue(session: UserSession): Promise<void> }
+  ).processQueue(session);
+
+  assert.deepEqual(replies, ["Final answer"]);
+});

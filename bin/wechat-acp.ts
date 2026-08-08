@@ -75,6 +75,8 @@ Options:
   --idle-timeout <m>  Session idle timeout in minutes (default: 1440)
                       Use 0 to disable idle cleanup
   --max-sessions <n>  Max concurrent user sessions (default: 10)
+  --turn-end-message <text>
+                      Send a standalone message after each completed agent turn
   --hide-thoughts     Do not forward agent thinking to WeChat (default: forwarded)
   --show-diffs        Forward ACP file diffs to WeChat (default: hidden)
   --hide-images       Do not forward agent image output to WeChat (default: forwarded)
@@ -133,6 +135,7 @@ function parseArgs(argv: string[]): {
   disableInbox: boolean;
   idleTimeout?: number;
   maxSessions?: number;
+  turnEndMessage?: string;
   injectText?: string;
   injectFile?: string;
   injectTo?: string;
@@ -201,6 +204,9 @@ function parseArgs(argv: string[]): {
         break;
       case "--max-sessions":
         result.maxSessions = parseInt(args[++i], 10);
+        break;
+      case "--turn-end-message":
+        result.turnEndMessage = args[++i];
         break;
       case "--text":
         result.injectText = args[++i];
@@ -507,6 +513,9 @@ async function main(): Promise<void> {
     config.session.idleTimeoutMs = args.idleTimeout * 60_000;
   }
   if (args.maxSessions) config.session.maxConcurrentUsers = args.maxSessions;
+  if (args.turnEndMessage !== undefined) {
+    config.session.turnEndMessage = args.turnEndMessage;
+  }
   if (args.hideThoughts) config.agent.showThoughts = false;
   if (args.showDiffs) config.agent.showDiffs = true;
   if (args.hideImages) config.agent.showImages = false;

@@ -150,6 +150,7 @@ export class WeChatAcpBridge {
         agentPreset: this.config.agent.preset ?? "raw",
         idleTimeoutMs: this.config.session.idleTimeoutMs,
         maxConcurrentUsers: this.config.session.maxConcurrentUsers,
+        turnEndMessage: this.config.session.turnEndMessage,
         showThoughts: this.config.agent.showThoughts,
         showDiffs: this.config.agent.showDiffs ?? false,
         showImages: this.config.agent.showImages ?? true,
