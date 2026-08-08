@@ -586,7 +586,7 @@ export class WeChatAcpBridge {
       return this.sendReply(userId, contextToken, `⚠️ Nothing buffered. Send ${BUFFER_START_COMMAND}${this.aliasHint(BUFFER_START_COMMAND)} first, then send messages before ${BUFFER_DONE_COMMAND}${this.aliasHint(BUFFER_DONE_COMMAND)}.`);
     }
 
-    this.beginAgentPrompt(userId, buffer.contextToken);
+    this.beginAgentPrompt(userId, contextToken);
 
     // Remove from map immediately so new messages during the await
     // are not appended to a stale buffer.
@@ -645,10 +645,15 @@ export class WeChatAcpBridge {
       hashUserId(userId),
     );
 
-    await this.sessionManager!.enqueue(userId, {
-      prompt: buffer.blocks,
-      contextToken: buffer.contextToken,
-    });
+    await this.enqueueBufferedPrompt(userId, contextToken, buffer.blocks);
+  }
+
+  protected async enqueueBufferedPrompt(
+    userId: string,
+    contextToken: string,
+    prompt: acp.ContentBlock[],
+  ): Promise<void> {
+    await this.sessionManager!.enqueue(userId, { prompt, contextToken });
   }
 
   private appendToBuffer(
@@ -688,7 +693,9 @@ export class WeChatAcpBridge {
         buffer.blocks.push(...prompt);
         buffer.contextToken = contextToken;
         buffer.lastUpdatedAt = Date.now();
-        this.resetBufferTimer(userId);
+        if (this.messageBuffers.has(userId)) {
+          this.resetBufferTimer(userId);
+        }
 
         this.log(`Buffered message from ${userId}, now ${buffer.blocks.length} block(s)`);
       });

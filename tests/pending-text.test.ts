@@ -95,7 +95,7 @@ test("expires pending text and bounds users and segments", () => {
   assert.equal(registry.snapshot("third"), null);
 });
 
-test("a newer prompt rejects late failures and fetch remainder from the old prompt", async () => {
+test("a newer prompt rejects late failures and drops the old fetch remainder", async () => {
   const registry = makeRegistry();
   const oldGeneration = registry.supersede("user", "old-context");
   registry.recordFailures("user", oldGeneration, ["old-one", "old-two"]);

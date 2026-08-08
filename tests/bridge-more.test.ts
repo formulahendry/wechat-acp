@@ -7,6 +7,7 @@ import { MessageType, type WeixinMessage } from "../src/weixin/types.js";
 
 class TestBridge extends WeChatAcpBridge {
   readonly enqueued: string[] = [];
+  readonly buffered: Array<{ contextToken: string; prompt: acp.ContentBlock[] }> = [];
   readonly sent: Array<{ contextToken: string; segment: string }> = [];
   sendBehavior: (
     contextToken: string,
@@ -19,6 +20,14 @@ class TestBridge extends WeChatAcpBridge {
     contextToken: string,
   ): Promise<void> {
     this.enqueued.push(contextToken);
+  }
+
+  protected override async enqueueBufferedPrompt(
+    _userId: string,
+    contextToken: string,
+    prompt: acp.ContentBlock[],
+  ): Promise<void> {
+    this.buffered.push({ contextToken, prompt });
   }
 
   protected override async sendTextSegment(
@@ -135,5 +144,23 @@ test("queued old reply cannot restore pending output after a newer prompt", asyn
     { contextToken: "context-blocker", segment: "No pending messages right now." },
     { contextToken: "context-old", segment: "stale output" },
     { contextToken: "context-fetch", segment: "No pending messages right now." },
+  ]);
+});
+
+test("buffer flush uses the fresh acp-prompt-done context token", async () => {
+  const bridge = makeBridge();
+
+  await bridge.handleMessage(
+    textMessage(BRIDGE_COMMANDS.promptStart, "context-start"),
+  );
+  await bridge.handleMessage(textMessage("buffered prompt", "context-content"));
+  await bridge.handleMessage(
+    textMessage(BRIDGE_COMMANDS.promptDone, "context-done"),
+  );
+
+  assert.equal(bridge.buffered.length, 1);
+  assert.equal(bridge.buffered[0]!.contextToken, "context-done");
+  assert.deepEqual(bridge.buffered[0]!.prompt, [
+    { type: "text", text: "buffered prompt" },
   ]);
 });
