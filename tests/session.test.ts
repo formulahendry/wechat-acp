@@ -125,6 +125,7 @@ function makeTurnSession(opts: {
   flushText: string;
   producedMessage: boolean;
   events: string[];
+  stopReason?: "end_turn" | "cancelled" | "refusal";
 }): UserSession {
   return {
     userId: "user-1",
@@ -144,7 +145,7 @@ function makeTurnSession(opts: {
       connection: {
         prompt: async () => {
           opts.events.push("prompt");
-          return { stopReason: "end_turn" };
+          return { stopReason: opts.stopReason ?? "end_turn" };
         },
       } as never,
       sessionId: "session-1",
@@ -248,4 +249,77 @@ test("turn end message remains disabled when it is not configured", async () => 
   ).processQueue(session);
 
   assert.deepEqual(replies, ["Final answer"]);
+});
+
+for (const { stopReason, expectedReply } of [
+  {
+    stopReason: "cancelled" as const,
+    expectedReply: "Partial answer\n[cancelled]",
+  },
+  {
+    stopReason: "refusal" as const,
+    expectedReply: "Partial answer\n[agent refused to continue]",
+  },
+]) {
+  test(`configured turn end message follows the ${stopReason} notice`, async () => {
+    const replies: string[] = [];
+    const manager = new SessionManager({
+      agentCommand: "unused",
+      agentArgs: [],
+      agentCwd: process.cwd(),
+      idleTimeoutMs: 0,
+      maxConcurrentUsers: 1,
+      turnEndMessage: "Done",
+      showThoughts: false,
+      log: () => {},
+      onReply: async (_userId, _contextToken, text) => {
+        replies.push(text);
+      },
+      sendTyping: async () => {},
+    });
+    const session = makeTurnSession({
+      flushText: "Partial answer",
+      producedMessage: true,
+      events: [],
+      stopReason,
+    });
+
+    await (
+      manager as unknown as { processQueue(session: UserSession): Promise<void> }
+    ).processQueue(session);
+
+    assert.deepEqual(replies, [expectedReply, "Done"]);
+  });
+}
+
+test("configured turn end message follows the empty-turn notice", async () => {
+  const replies: string[] = [];
+  const manager = new SessionManager({
+    agentCommand: "unused",
+    agentArgs: [],
+    agentCwd: process.cwd(),
+    idleTimeoutMs: 0,
+    maxConcurrentUsers: 1,
+    turnEndMessage: "Done",
+    showThoughts: false,
+    log: () => {},
+    onReply: async (_userId, _contextToken, text) => {
+      replies.push(text);
+    },
+    sendTyping: async () => {},
+  });
+  const session = makeTurnSession({
+    flushText: "",
+    producedMessage: false,
+    events: [],
+  });
+
+  await (
+    manager as unknown as { processQueue(session: UserSession): Promise<void> }
+  ).processQueue(session);
+
+  assert.deepEqual(replies, [
+    "ℹ️ The agent finished without sending a reply. Try rephrasing your request.",
+    "Done",
+  ]);
 });
