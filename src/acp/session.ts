@@ -488,11 +488,18 @@ export class SessionManager {
           }
 
           if (this.opts.turnEndMessage?.trim()) {
-            await this.opts.onReply(
-              session.userId,
-              pending.contextToken,
-              this.opts.turnEndMessage,
-            );
+            try {
+              await this.opts.onReply(
+                session.userId,
+                pending.contextToken,
+                this.opts.turnEndMessage,
+              );
+            } catch (err) {
+              this.opts.log(
+                `[${session.userId}] Failed to send turn end message: ${String(err)}`,
+              );
+              trackException(err, "reply.turn_end", hashUserId(session.userId));
+            }
           }
         } catch (err) {
           completionError = err;

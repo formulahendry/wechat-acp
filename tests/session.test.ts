@@ -126,6 +126,10 @@ function makeTurnSession(opts: {
   producedMessage: boolean;
   events: string[];
   stopReason?: "end_turn" | "cancelled" | "refusal";
+  completion?: {
+    resolve: () => void;
+    reject: (err: unknown) => void;
+  };
 }): UserSession {
   return {
     userId: "user-1",
@@ -152,7 +156,11 @@ function makeTurnSession(opts: {
       configOptions: [],
     },
     configOptions: [],
-    queue: [{ prompt: [], contextToken: "turn-context" }],
+    queue: [{
+      prompt: [],
+      contextToken: "turn-context",
+      completion: opts.completion,
+    }],
     processing: true,
     lastActivity: Date.now(),
     createdAt: Date.now(),
@@ -322,4 +330,58 @@ test("configured turn end message follows the empty-turn notice", async () => {
     "ℹ️ The agent finished without sending a reply. Try rephrasing your request.",
     "Done",
   ]);
+});
+
+test("turn end message delivery failure does not fail a completed prompt", async () => {
+  const replies: string[] = [];
+  const logs: string[] = [];
+  const completions: string[] = [];
+  const manager = new SessionManager({
+    agentCommand: "unused",
+    agentArgs: [],
+    agentCwd: process.cwd(),
+    idleTimeoutMs: 0,
+    maxConcurrentUsers: 1,
+    turnEndMessage: "Done",
+    showThoughts: false,
+    log: (message) => {
+      logs.push(message);
+    },
+    onReply: async (_userId, _contextToken, text) => {
+      replies.push(text);
+      if (text === "Done") {
+        throw new Error("marker delivery failed");
+      }
+    },
+    sendTyping: async () => {},
+  });
+  const session = makeTurnSession({
+    flushText: "Final answer",
+    producedMessage: true,
+    events: [],
+    completion: {
+      resolve: () => {
+        completions.push("resolved");
+      },
+      reject: () => {
+        completions.push("rejected");
+      },
+    },
+  });
+
+  await (
+    manager as unknown as { processQueue(session: UserSession): Promise<void> }
+  ).processQueue(session);
+
+  assert.deepEqual(replies, ["Final answer", "Done"]);
+  assert.deepEqual(completions, ["resolved"]);
+  assert.ok(
+    logs.some((message) =>
+      message.includes("Failed to send turn end message: Error: marker delivery failed")
+    ),
+  );
+  assert.equal(
+    logs.some((message) => message.includes("Agent prompt error")),
+    false,
+  );
 });
