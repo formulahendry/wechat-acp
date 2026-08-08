@@ -35,6 +35,7 @@ test("concurrent session creation reserves maxConcurrentUsers capacity", async (
         connection: {} as never,
         sessionId: userId,
         configOptions: [],
+        sessionOutcome: "new",
       },
       configOptions: [],
       queue: [],
@@ -70,6 +71,7 @@ test("SessionManager.stop waits for every MCP lease before reporting failures", 
     onReply: async () => {},
     sendTyping: async () => {},
   });
+
   const events: string[] = [];
   const sessions = (
     manager as unknown as { sessions: Map<string, UserSession> }
@@ -86,6 +88,7 @@ test("SessionManager.stop waits for every MCP lease before reporting failures", 
       connection: {} as never,
       sessionId: userId,
       configOptions: [],
+      sessionOutcome: "new",
     },
     mcpLease: { mcpServer: {} as never, close },
     configOptions: [],
@@ -118,6 +121,37 @@ test("SessionManager.stop waits for every MCP lease before reporting failures", 
     "second-start",
     "first-failed",
     "second-finished",
+  ]);
+});
+
+test("session creation failures are surfaced to the WeChat user", async () => {
+  const replies: string[] = [];
+  const manager = new SessionManager({
+    agentCommand: "unused",
+    agentArgs: [],
+    agentCwd: process.cwd(),
+    idleTimeoutMs: 0,
+    maxConcurrentUsers: 1,
+    showThoughts: false,
+    log: () => {},
+    onReply: async (_userId, _contextToken, text) => {
+      replies.push(text);
+    },
+    sendTyping: async () => {},
+  });
+  const internal = manager as unknown as {
+    createSession(userId: string, contextToken: string): Promise<UserSession>;
+  };
+  internal.createSession = async () => {
+    throw new Error("persisted session could not be loaded");
+  };
+
+  await assert.rejects(
+    manager.enqueue("user-1", { prompt: [], contextToken: "context-1" }),
+    /persisted session could not be loaded/,
+  );
+  assert.deepEqual(replies, [
+    "⚠️ Agent session error: persisted session could not be loaded",
   ]);
 });
 
@@ -154,6 +188,7 @@ function makeTurnSession(opts: {
       } as never,
       sessionId: "session-1",
       configOptions: [],
+      sessionOutcome: "new",
     },
     configOptions: [],
     queue: [{
@@ -355,6 +390,7 @@ test("turn end message delivery failure does not fail a completed prompt", async
     },
     sendTyping: async () => {},
   });
+
   const session = makeTurnSession({
     flushText: "Final answer",
     producedMessage: true,
@@ -384,4 +420,35 @@ test("turn end message delivery failure does not fail a completed prompt", async
     logs.some((message) => message.includes("Agent prompt error")),
     false,
   );
+});
+
+test("a new ACP session is persisted after its first completed prompt", async () => {
+  const persisted: string[] = [];
+  const manager = new SessionManager({
+    agentCommand: "unused",
+    agentArgs: [],
+    agentCwd: process.cwd(),
+    idleTimeoutMs: 0,
+    maxConcurrentUsers: 1,
+    resumePolicy: "auto",
+    persistSessionId: async (userId, sessionId) => {
+      persisted.push(`${userId}:${sessionId}`);
+    },
+    showThoughts: false,
+    log: () => {},
+    onReply: async () => {},
+    sendTyping: async () => {},
+  });
+  const session = makeTurnSession({
+    flushText: "Done",
+    producedMessage: true,
+    events: [],
+  });
+
+  await (
+    manager as unknown as { processQueue(session: UserSession): Promise<void> }
+  ).processQueue(session);
+
+  assert.deepEqual(persisted, ["user-1:session-1"]);
+  assert.equal(session.sessionIdPersisted, true);
 });

@@ -24,10 +24,21 @@ import {
 import { sanitizeFileName } from "./artifacts/store.js";
 import { weixinMessageToPrompt } from "./adapter/inbound.js";
 import type { WeChatAcpConfig } from "./config.js";
-import { BRIDGE_COMMANDS, resolveCommandAliases, resolveCommandNames } from "./config.js";
+import {
+  BRIDGE_COMMANDS,
+  buildAgentSessionScope,
+  resolveCommandAliases,
+  resolveCommandNames,
+} from "./config.js";
 import { InjectionMonitor } from "./inject/monitor.js";
 import type { InjectedMessage } from "./inject/types.js";
-import { resolveUserTarget, updateLastActiveUser } from "./storage/state.js";
+import {
+  getPersistedSessionId,
+  removePersistedSession,
+  resolveUserTarget,
+  updateLastActiveUser,
+  updatePersistedSession,
+} from "./storage/state.js";
 import { trackEvent, trackException, hashUserId } from "./telemetry/index.js";
 
 const ACP_CONFIG_COMMAND = BRIDGE_COMMANDS.acpConfig;
@@ -142,6 +153,12 @@ export class WeChatAcpBridge {
           trackException(err, "artifact_mcp");
         }
       }
+      const resumePolicy = this.config.session.resume ?? "off";
+      if (resumePolicy !== "off" && !this.config.storage.stateFile) {
+        throw new Error("Session resume requires storage.stateFile");
+      }
+      const sessionScope = buildAgentSessionScope(this.config.agent);
+      const stateFile = this.config.storage.stateFile;
       this.sessionManager = new SessionManager({
         agentCommand: this.config.agent.command,
         agentArgs: this.config.agent.args,
@@ -150,6 +167,28 @@ export class WeChatAcpBridge {
         agentPreset: this.config.agent.preset ?? "raw",
         idleTimeoutMs: this.config.session.idleTimeoutMs,
         maxConcurrentUsers: this.config.session.maxConcurrentUsers,
+        resumePolicy,
+        getPersistedSessionId:
+          resumePolicy !== "off" && stateFile
+            ? async (userId) => {
+                await this.stateUpdate.catch(() => {});
+                return getPersistedSessionId(stateFile, userId, sessionScope);
+              }
+            : undefined,
+        persistSessionId:
+          resumePolicy !== "off" && stateFile
+            ? (userId, sessionId) =>
+                this.enqueueStateUpdate(() =>
+                  updatePersistedSession(stateFile, userId, sessionScope, sessionId),
+                )
+            : undefined,
+        removePersistedSessionId:
+          resumePolicy !== "off" && stateFile
+            ? (userId) =>
+                this.enqueueStateUpdate(() =>
+                  removePersistedSession(stateFile, userId, sessionScope),
+                )
+            : undefined,
         turnEndMessage: this.config.session.turnEndMessage,
         showThoughts: this.config.agent.showThoughts,
         showDiffs: this.config.agent.showDiffs ?? false,
@@ -647,13 +686,19 @@ export class WeChatAcpBridge {
 
   private rememberActiveUser(userId: string, contextToken: string): void {
     if (!this.config.storage.stateFile) return;
-    this.stateUpdate = this.stateUpdate
-      .catch(() => {})
-      .then(() => updateLastActiveUser(this.config.storage.stateFile!, userId, contextToken));
-    this.stateUpdate.catch((err) => {
+    const update = this.enqueueStateUpdate(() =>
+      updateLastActiveUser(this.config.storage.stateFile!, userId, contextToken),
+    );
+    update.catch((err) => {
       this.log(`Failed to persist last active user: ${String(err)}`);
       trackException(sanitizeStateError(err), "state", hashUserId(userId));
     });
+  }
+
+  private enqueueStateUpdate(update: () => Promise<void>): Promise<void> {
+    const pending = this.stateUpdate.catch(() => {}).then(update);
+    this.stateUpdate = pending;
+    return pending;
   }
 
   private async sendReply(userId: string, contextToken: string, text: string): Promise<void> {

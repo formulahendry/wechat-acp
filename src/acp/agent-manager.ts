@@ -7,13 +7,17 @@ import { Writable, Readable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import packageJson from "../../package.json" with { type: "json" };
 import type { WeChatAcpClient } from "./client.js";
+import type { SessionResumePolicy } from "../config.js";
 import { trackException } from "../telemetry/index.js";
+
+export type AgentSessionOutcome = "new" | "loaded" | "unsupported" | "not_found";
 
 export interface AgentProcessInfo {
   process: ChildProcess;
   connection: acp.ClientSideConnection;
   sessionId: string;
   configOptions: acp.SessionConfigOption[];
+  sessionOutcome: AgentSessionOutcome;
 }
 
 export async function spawnAgent(params: {
@@ -23,10 +27,23 @@ export async function spawnAgent(params: {
   env?: Record<string, string>;
   client: WeChatAcpClient;
   mcpServers?: acp.McpServer[];
+  resumePolicy?: SessionResumePolicy;
+  persistedSessionId?: string;
   signal?: AbortSignal;
   log: (msg: string) => void;
 }): Promise<AgentProcessInfo> {
-  const { command, args, cwd, env, client, mcpServers = [], signal, log } = params;
+  const {
+    command,
+    args,
+    cwd,
+    env,
+    client,
+    mcpServers = [],
+    resumePolicy = "off",
+    persistedSessionId,
+    signal,
+    log,
+  } = params;
   if (signal?.aborted) {
     throw new Error("Agent spawn aborted");
   }
@@ -89,7 +106,7 @@ export async function spawnAgent(params: {
     );
     log(`ACP initialized (protocol v${initResult.protocolVersion})`);
 
-    // Create session
+    // Create or load session
     const supportsHttpMcp = initResult.agentCapabilities?.mcpCapabilities?.http === true;
     const sessionMcpServers = supportsHttpMcp
       ? mcpServers.filter(
@@ -100,6 +117,49 @@ export async function spawnAgent(params: {
     if (mcpServers.length > 0 && !supportsHttpMcp) {
       log("Agent does not advertise HTTP MCP support; file attachments are unavailable");
     }
+
+    let sessionOutcome: AgentSessionOutcome = "new";
+    if (persistedSessionId && resumePolicy !== "off") {
+      if (initResult.agentCapabilities?.loadSession !== true) {
+        if (resumePolicy === "required") {
+          throw new Error(
+            `Agent does not support loading persisted ACP session ${persistedSessionId}`,
+          );
+        }
+        sessionOutcome = "unsupported";
+        log("Agent does not advertise session/load; creating a new ACP session");
+      } else {
+        log(`Loading ACP session: ${persistedSessionId}`);
+        client.beginSessionReplay();
+        try {
+          const loadResult = await abortable(
+            connection.loadSession({
+              cwd,
+              mcpServers: sessionMcpServers,
+              sessionId: persistedSessionId,
+            }),
+            signal,
+          );
+          await client.endSessionReplay();
+          log(`ACP session loaded: ${persistedSessionId}`);
+          return {
+            process: proc,
+            connection,
+            sessionId: persistedSessionId,
+            configOptions: loadResult.configOptions ?? [],
+            sessionOutcome: "loaded",
+          };
+        } catch (err) {
+          await client.endSessionReplay();
+          if (resumePolicy !== "auto" || !isResourceNotFound(err)) {
+            throw normalizeError(err);
+          }
+          sessionOutcome = "not_found";
+          log(`Persisted ACP session not found: ${persistedSessionId}; creating a new session`);
+        }
+      }
+    }
+
     log("Creating ACP session...");
     const sessionResult = await abortable(
       connection.newSession({
@@ -115,12 +175,35 @@ export async function spawnAgent(params: {
       connection,
       sessionId: sessionResult.sessionId,
       configOptions: sessionResult.configOptions ?? [],
+      sessionOutcome,
     };
   } catch (err) {
     killAgent(proc);
     throw err;
   } finally {
     signal?.removeEventListener("abort", abortSpawn);
+  }
+
+  function isResourceNotFound(err: unknown): boolean {
+    return (
+      typeof err === "object" &&
+      err !== null &&
+      "code" in err &&
+      err.code === -32002
+    );
+  }
+
+  function normalizeError(err: unknown): Error {
+    if (err instanceof Error) return err;
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "message" in err &&
+      typeof err.message === "string"
+    ) {
+      return new Error(err.message, { cause: err });
+    }
+    return new Error(String(err), { cause: err });
   }
 }
 

@@ -311,6 +311,7 @@ export class WeChatAcpClient implements acp.Client {
   // Per-turn mutable state (callbacks, buffers, flags). Swapped wholesale by
   // beginTurn; queued tasks operate on the turn object captured at arrival.
   private turn: TurnState;
+  private suppressSessionUpdates = false;
   // FIFO task queue serializing all session-notification handling and flush()
   // reads. The ACP SDK dispatches notifications without awaiting handlers, so
   // without this two sessionUpdate calls interleave at their first await:
@@ -379,6 +380,22 @@ export class WeChatAcpClient implements acp.Client {
     });
   }
 
+  beginSessionReplay(): void {
+    this.suppressSessionUpdates = true;
+  }
+
+  /**
+   * Wait for all replay notifications to drain before accepting live updates.
+   * ACP requires `session/load` to replay history, which must not be forwarded
+   * to WeChat as if it were new agent output.
+   */
+  async endSessionReplay(): Promise<void> {
+    return this.enqueue(async () => {
+      this.suppressSessionUpdates = false;
+      this.turn = freshTurn(this.turn.opts);
+    });
+  }
+
   async requestPermission(
     params: acp.RequestPermissionRequest,
   ): Promise<acp.RequestPermissionResponse> {
@@ -420,7 +437,10 @@ export class WeChatAcpClient implements acp.Client {
     // guarantees it reads and writes the state of the turn it belongs to,
     // never the next turn's buffers or callbacks (issue 54).
     const turn = this.turn;
-    return this.enqueue(() => this.handleSessionUpdate(params, turn));
+    const suppressed = this.suppressSessionUpdates;
+    return this.enqueue(() =>
+      suppressed ? Promise.resolve() : this.handleSessionUpdate(params, turn),
+    );
   }
 
   private async handleSessionUpdate(

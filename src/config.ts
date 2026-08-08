@@ -4,6 +4,9 @@
 
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
+
+export type SessionResumePolicy = "off" | "auto" | "required";
 
 export interface AgentCommandConfig {
   command: string;
@@ -152,6 +155,12 @@ export interface WeChatAcpConfig {
     idleTimeoutMs: number;
     maxConcurrentUsers: number;
     /**
+     * Whether persisted ACP sessions should be loaded after bridge restarts.
+     * `auto` falls back to a new session only when loading is unsupported or
+     * the saved session no longer exists. `required` rejects those fallbacks.
+     */
+    resume?: SessionResumePolicy;
+    /**
      * Optional standalone message sent after an ACP prompt turn completes.
      * Omit or set to an empty string to disable the completion indicator.
      */
@@ -229,6 +238,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
     session: {
       idleTimeoutMs: 1440 * 60_000, // 24 hours
       maxConcurrentUsers: 10,
+      resume: "off",
     },
     daemon: {
       enabled: false,
@@ -243,6 +253,35 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       inboxDir: path.join(storageDir, "inbox"),
     },
   };
+}
+
+export function parseSessionResumePolicy(value: unknown): SessionResumePolicy {
+  if (value === "off" || value === "auto" || value === "required") {
+    return value;
+  }
+  throw new Error(
+    `Invalid session resume policy: ${JSON.stringify(value)}. ` +
+      'Expected "off", "auto", or "required".',
+  );
+}
+
+/**
+ * Build a stable, opaque key for persisted sessions. Preset identities stay
+ * stable when bundled command arguments evolve; raw commands intentionally
+ * treat any command-line change as a different agent configuration.
+ */
+export function buildAgentSessionScope(
+  agent: Pick<WeChatAcpConfig["agent"], "preset" | "command" | "args" | "cwd">,
+): string {
+  const cwd = path.resolve(agent.cwd);
+  const identity = agent.preset
+    ? { kind: "preset", id: agent.preset, cwd }
+    : { kind: "raw", command: agent.command, args: agent.args, cwd };
+  const digest = crypto
+    .createHash("sha256")
+    .update(JSON.stringify(identity))
+    .digest("hex");
+  return `v1:${digest}`;
 }
 
 /**

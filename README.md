@@ -101,6 +101,7 @@ Options:
 - `--instance <name>`: run as a named, isolated instance. See "Running multiple instances" below.
 - `--idle-timeout <minutes>`: session idle timeout, default `1440` (use `0` for unlimited)
 - `--max-sessions <count>`: maximum concurrent user sessions, default `10`
+- `--session-resume <mode>`: persistence policy across bridge restarts: `off` (default), `auto`, or `required`
 - `--turn-end-message <text>`: send a standalone message after each completed agent turn (default: disabled)
 - `--inbox-dir <dir>`: directory where received binary files are saved (default: `<storage.dir>/inbox`). The agent sees the absolute saved path in the prompt and can read the file directly.
 - `--no-inbox`: do not save received files; the agent only sees a size notice.
@@ -163,10 +164,28 @@ Example:
   "session": {
     "idleTimeoutMs": 86400000,
     "maxConcurrentUsers": 10,
+    "resume": "auto",
     "turnEndMessage": "✅ Turn complete"
   }
 }
 ```
+
+`session.resume` controls whether each WeChat user's ACP conversation is
+restored after the bridge restarts:
+
+- `off` keeps the existing behavior and always starts a new ACP session.
+- `auto` loads a saved session when the agent advertises the ACP
+  `loadSession` capability. It starts a new session when loading is unsupported
+  or the saved session no longer exists, but surfaces other load failures.
+- `required` requires an existing saved session to load successfully. A user
+  without a saved session can still start their first conversation.
+
+Session IDs are saved only after the first prompt completes. Loading replays
+history at the ACP protocol level, but the bridge suppresses that replay so old
+messages are not sent to WeChat again. Sessions are isolated by agent and
+absolute working directory: built-in presets use their stable preset ID, while
+raw agents use their command and arguments. Environment variables are never
+stored or included in the identity.
 
 `session.turnEndMessage` is optional. When set to a non-empty string, the
 bridge sends it as a standalone WeChat message after the ACP prompt resolves
@@ -238,6 +257,7 @@ Notes:
 ## Runtime Behavior
 
 - Each WeChat user gets a dedicated ACP session and subprocess.
+- With session resume enabled, persisted sessions can survive subprocess and bridge restarts.
 - Messages are processed serially per user.
 - Replies are formatted for WeChat before sending.
 - Typing indicators are sent when supported by the WeChat API.

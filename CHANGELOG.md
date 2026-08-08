@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Add opt-in ACP session persistence across bridge restarts. Configure
+  `session.resume` or pass `--session-resume <off|auto|required>`. The bridge
+  checks the agent's advertised `loadSession` capability at runtime, restores
+  supported sessions with fresh MCP connections, and suppresses history replay
+  from being re-sent to WeChat. Preset identities remain stable across bundled
+  argument changes; raw agents are isolated by command, arguments, and cwd.
 - Add an opt-in standalone turn completion message so WeChat users can tell when a streamed or long-running ACP prompt has actually ended. Configure `session.turnEndMessage` or pass `--turn-end-message <text>`; the bridge sends the text after `prompt()` resolves and the turn's queued output has drained. Fixes #66.
 
 ## 0.10.0

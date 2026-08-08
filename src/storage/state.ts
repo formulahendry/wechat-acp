@@ -8,6 +8,12 @@ const MAX_STORED_USERS = 100;
 export interface UserState {
   contextToken: string;
   lastSeenAt: string;
+  sessions?: Record<string, PersistedSessionState>;
+}
+
+export interface PersistedSessionState {
+  sessionId: string;
+  savedAt: string;
 }
 
 export interface BridgeState {
@@ -48,15 +54,74 @@ export async function updateLastActiveUser(
   contextToken: string,
 ): Promise<void> {
   const state = await loadState(stateFile);
+  const existing = state.users?.[userId];
   state.lastActiveUserId = userId;
   state.users = {
     ...(state.users ?? {}),
     [userId]: {
+      ...existing,
       contextToken,
       lastSeenAt: new Date().toISOString(),
     },
   };
   state.users = pruneUsers(state.users);
+  await saveState(stateFile, state);
+}
+
+export async function getPersistedSessionId(
+  stateFile: string,
+  userId: string,
+  scope: string,
+): Promise<string | undefined> {
+  const state = await loadState(stateFile);
+  return state.users?.[userId]?.sessions?.[scope]?.sessionId;
+}
+
+export async function updatePersistedSession(
+  stateFile: string,
+  userId: string,
+  scope: string,
+  sessionId: string,
+): Promise<void> {
+  const state = await loadState(stateFile);
+  const existing = state.users?.[userId];
+  if (!existing) {
+    throw new Error(`Cannot persist ACP session for unknown user ${userId}`);
+  }
+  state.users = {
+    ...(state.users ?? {}),
+    [userId]: {
+      ...existing,
+      sessions: {
+        ...(existing.sessions ?? {}),
+        [scope]: {
+          sessionId,
+          savedAt: new Date().toISOString(),
+        },
+      },
+    },
+  };
+  await saveState(stateFile, state);
+}
+
+export async function removePersistedSession(
+  stateFile: string,
+  userId: string,
+  scope: string,
+): Promise<void> {
+  const state = await loadState(stateFile);
+  const existing = state.users?.[userId];
+  if (!existing?.sessions?.[scope]) return;
+
+  const sessions = { ...existing.sessions };
+  delete sessions[scope];
+  state.users = {
+    ...(state.users ?? {}),
+    [userId]: {
+      ...existing,
+      ...(Object.keys(sessions).length > 0 ? { sessions } : { sessions: undefined }),
+    },
+  };
   await saveState(stateFile, state);
 }
 

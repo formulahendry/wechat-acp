@@ -22,6 +22,7 @@ import {
   defaultConfig,
   defaultStorageDir,
   listBuiltInAgents,
+  parseSessionResumePolicy,
   resolveAgentSelection,
   validateCommandAliases,
   validateInstanceName,
@@ -75,6 +76,9 @@ Options:
   --idle-timeout <m>  Session idle timeout in minutes (default: 1440)
                       Use 0 to disable idle cleanup
   --max-sessions <n>  Max concurrent user sessions (default: 10)
+  --session-resume <mode>
+                      Resume ACP sessions after restart: off, auto, or required
+                      (default: off)
   --turn-end-message <text>
                       Send a standalone message after each completed agent turn
   --hide-thoughts     Do not forward agent thinking to WeChat (default: forwarded)
@@ -135,6 +139,7 @@ function parseArgs(argv: string[]): {
   disableInbox: boolean;
   idleTimeout?: number;
   maxSessions?: number;
+  sessionResume?: string;
   turnEndMessage?: string;
   injectText?: string;
   injectFile?: string;
@@ -204,6 +209,9 @@ function parseArgs(argv: string[]): {
         break;
       case "--max-sessions":
         result.maxSessions = parseInt(args[++i], 10);
+        break;
+      case "--session-resume":
+        result.sessionResume = args[++i];
         break;
       case "--turn-end-message":
         result.turnEndMessage = args[++i];
@@ -503,7 +511,7 @@ async function main(): Promise<void> {
     }
   }
 
-  if (args.cwd) config.agent.cwd = path.resolve(args.cwd);
+  config.agent.cwd = path.resolve(args.cwd ?? config.agent.cwd);
   if (args.idleTimeout !== undefined) {
     if (!Number.isFinite(args.idleTimeout) || args.idleTimeout < 0) {
       console.error("Error: invalid --idle-timeout value");
@@ -513,6 +521,14 @@ async function main(): Promise<void> {
     config.session.idleTimeoutMs = args.idleTimeout * 60_000;
   }
   if (args.maxSessions) config.session.maxConcurrentUsers = args.maxSessions;
+  try {
+    config.session.resume = parseSessionResumePolicy(
+      args.sessionResume ?? config.session.resume,
+    );
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
   if (args.turnEndMessage !== undefined) {
     config.session.turnEndMessage = args.turnEndMessage;
   }

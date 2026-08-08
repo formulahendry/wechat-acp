@@ -15,6 +15,7 @@ import {
 } from "./client.js";
 import type { AgentResourceLink } from "../artifacts/types.js";
 import { spawnAgent, killAgent, type AgentProcessInfo } from "./agent-manager.js";
+import type { SessionResumePolicy } from "../config.js";
 import { trackEvent, trackException, hashUserId } from "../telemetry/index.js";
 
 /**
@@ -56,6 +57,7 @@ export interface UserSession {
   configOptions: acp.SessionConfigOption[];
   queue: PendingMessage[];
   processing: boolean;
+  sessionIdPersisted?: boolean;
   lastActivity: number;
   createdAt: number;
 }
@@ -73,6 +75,10 @@ export interface SessionManagerOpts {
   agentPreset?: string;
   idleTimeoutMs: number;
   maxConcurrentUsers: number;
+  resumePolicy?: SessionResumePolicy;
+  getPersistedSessionId?: (userId: string) => Promise<string | undefined>;
+  persistSessionId?: (userId: string, sessionId: string) => Promise<void>;
+  removePersistedSessionId?: (userId: string) => Promise<void>;
   turnEndMessage?: string;
   showThoughts: boolean;
   showDiffs?: boolean;
@@ -143,9 +149,23 @@ export class SessionManager {
       throw new Error("Session manager is stopped");
     }
 
-    const session =
-      this.sessions.get(userId) ??
-      (await this.getOrCreateSession(userId, message.contextToken));
+    let session: UserSession;
+    try {
+      session =
+        this.sessions.get(userId) ??
+        (await this.getOrCreateSession(userId, message.contextToken));
+    } catch (err) {
+      try {
+        await this.opts.onReply(
+          userId,
+          message.contextToken,
+          `⚠️ Agent session error: ${errorMessage(err)}`,
+        );
+      } catch (replyErr) {
+        this.opts.log(`[${userId}] Failed to send session error: ${String(replyErr)}`);
+      }
+      throw err;
+    }
 
     // Always update contextToken to the latest
     session.contextToken = message.contextToken;
@@ -158,6 +178,19 @@ export class SessionManager {
       this.processQueue(session).catch((err) => {
         this.opts.log(`[${userId}] queue processing error: ${String(err)}`);
       });
+    }
+
+    function errorMessage(err: unknown): string {
+      if (err instanceof Error) return err.message;
+      if (
+        typeof err === "object" &&
+        err !== null &&
+        "message" in err &&
+        typeof err.message === "string"
+      ) {
+        return err.message;
+      }
+      return String(err);
     }
   }
 
@@ -344,6 +377,11 @@ export class SessionManager {
     });
 
     const mcpLease = this.opts.createMcpLease?.();
+    const resumePolicy = this.opts.resumePolicy ?? "off";
+    const persistedSessionId =
+      resumePolicy === "off"
+        ? undefined
+        : await this.opts.getPersistedSessionId?.(userId);
     let agentInfo: AgentProcessInfo;
     try {
       agentInfo = await spawnAgent({
@@ -353,6 +391,8 @@ export class SessionManager {
         env: this.opts.agentEnv,
         client,
         mcpServers: mcpLease ? [mcpLease.mcpServer] : [],
+        resumePolicy,
+        persistedSessionId,
         signal: this.creationAbortController.signal,
         log: (msg) => this.opts.log(`[${userId}] ${msg}`),
       });
@@ -361,12 +401,22 @@ export class SessionManager {
       throw err;
     }
 
+    if (agentInfo.sessionOutcome === "not_found") {
+      try {
+        await this.opts.removePersistedSessionId?.(userId);
+      } catch (err) {
+        this.opts.log(`[${userId}] Failed to remove invalid persisted session: ${String(err)}`);
+        trackException(err, "session.persistence", hashUserId(userId));
+      }
+    }
+
     trackEvent(
       "session.created",
       {
         userIdHash: hashUserId(userId),
         agentPreset: this.opts.agentPreset ?? "raw",
         activeSessions: this.sessions.size + 1,
+        sessionOutcome: agentInfo.sessionOutcome,
       },
       hashUserId(userId),
     );
@@ -393,6 +443,7 @@ export class SessionManager {
       configOptions: agentInfo.configOptions,
       queue: [],
       processing: false,
+      sessionIdPersisted: agentInfo.sessionOutcome === "loaded",
       lastActivity: Date.now(),
       createdAt: Date.now(),
     };
@@ -445,6 +496,7 @@ export class SessionManager {
             sessionId: session.agentInfo.sessionId,
             prompt: pending.prompt,
           });
+          await this.persistSessionId(session);
 
           // Collect accumulated text
           let replyText = await session.client.flush();
@@ -595,6 +647,18 @@ export class SessionManager {
   private rejectQueuedCompletions(session: UserSession, err: unknown): void {
     for (const pending of session.queue.splice(0)) {
       pending.completion?.reject(err);
+    }
+  }
+
+  private async persistSessionId(session: UserSession): Promise<void> {
+    if (session.sessionIdPersisted || !this.opts.persistSessionId) return;
+    try {
+      await this.opts.persistSessionId(session.userId, session.agentInfo.sessionId);
+      session.sessionIdPersisted = true;
+      this.opts.log(`[${session.userId}] Persisted ACP session ${session.agentInfo.sessionId}`);
+    } catch (err) {
+      this.opts.log(`[${session.userId}] Failed to persist ACP session: ${String(err)}`);
+      trackException(err, "session.persistence", hashUserId(session.userId));
     }
   }
 }
