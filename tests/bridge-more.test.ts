@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { ContentBlock } from "@agentclientprotocol/sdk";
 
 import { WeChatAcpBridge } from "../src/bridge.js";
 import { BRIDGE_COMMANDS, defaultConfig } from "../src/config.js";
@@ -7,7 +8,7 @@ import { MessageType, type WeixinMessage } from "../src/weixin/types.js";
 
 class TestBridge extends WeChatAcpBridge {
   readonly enqueued: string[] = [];
-  readonly buffered: Array<{ contextToken: string; prompt: acp.ContentBlock[] }> = [];
+  readonly buffered: Array<{ contextToken: string; prompt: ContentBlock[] }> = [];
   readonly sent: Array<{ contextToken: string; segment: string }> = [];
   sendBehavior: (
     contextToken: string,
@@ -25,7 +26,7 @@ class TestBridge extends WeChatAcpBridge {
   protected override async enqueueBufferedPrompt(
     _userId: string,
     contextToken: string,
-    prompt: acp.ContentBlock[],
+    prompt: ContentBlock[],
   ): Promise<void> {
     this.buffered.push({ contextToken, prompt });
   }
