@@ -22,7 +22,6 @@ export {
 	resolveAgentSelection,
 	resolveCommandAliases,
 	resolveCommandNames,
-	matchBridgeCommand,
 	validateCommandAliases,
 	validateInstanceName,
 } from "./config.js";

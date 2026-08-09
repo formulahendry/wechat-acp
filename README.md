@@ -224,8 +224,7 @@ command to one or more custom aliases via the `commandAliases` config map:
 {
   "commandAliases": {
     "/acp-cancel": ["/cancel", "/取消", "取消"],
-    "/acp-config": ["/config", "/设置"],
-    "/acp-more": ["/acp-fetch-msg", "."]
+    "/acp-config": ["/config", "/设置"]
   }
 }
 ```
@@ -282,8 +281,8 @@ retries. That segment and the remaining segments stay pending for the next
 in memory, limited to 50 text segments per active user, and does not include
 images, audio, or files.
 
-Aliases work through `commandAliases`. A bare alias such as `"."` must match the
-whole message, so it is intercepted before the normal ACP enqueue path.
+Aliases work through `commandAliases`. Bare aliases must match the whole
+message, so they are intercepted before the normal ACP enqueue path.
 
 This mitigation can only retain failures reported by iLink. If iLink returns
 success but silently drops a message, the bridge cannot detect or replay it.
