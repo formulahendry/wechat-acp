@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Limit `--hide-images` and `agent.showImages: false` to inline images emitted
+  by tool calls, including Copilot CLI `rawOutput` fallbacks and embedded image
+  resources. Explicit agent message images and attached `resource_link` images
+  are always sent.
+
 - Add `/acp-new` to clear one WeChat user's ACP conversation without restarting
   the bridge. The command stops that user's active turn and agent process, drops
   queued and buffered messages, removes the persisted session ID for every

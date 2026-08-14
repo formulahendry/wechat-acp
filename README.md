@@ -107,7 +107,7 @@ Options:
 - `--no-inbox`: do not save received files; the agent only sees a size notice.
 - `--hide-thoughts`: do not forward agent thinking to WeChat (default: forwarded)
 - `--show-diffs`: forward ACP file diffs to WeChat (default: hidden)
-- `--hide-images`: do not forward agent image output to WeChat (default: forwarded)
+- `--hide-images`: suppress inline images from tool calls. Explicit agent message images and attachments are still sent.
 - `--hide-audio`: do not forward agent audio output to WeChat (default: forwarded)
 - `--hide-resources`: do not forward agent resources or generated file attachments to WeChat (default: forwarded)
 - `inject --text <text>`: enqueue a local text message for the running daemon
@@ -337,7 +337,7 @@ Notes:
 
 - The command only works after the WeChat user already has an active ACP session. If not, send a normal message first so the session is created.
 - Agent-specific `configId` values come from the ACP agent's `configOptions`, so that part of the list depends on the configured agent.
-- The built-in `bridge.thoughts`, `bridge.diffs`, `bridge.images`, and `bridge.audio` options control output forwarding for the current WeChat user's session. They use the startup config as defaults, accept `on` or `off`, and are not persisted across session resets or bridge restarts.
+- The built-in `bridge.thoughts`, `bridge.diffs`, and `bridge.audio` options control output forwarding for the current WeChat user's session. `bridge.images` controls only inline tool images; explicit response images and attached `resource_link` images are always sent. These options use the startup config as defaults, accept `on` or `off`, and are not persisted across session resets or bridge restarts.
 - Runtime bridge changes take effect on the next agent turn. They do not change a turn that is already running.
 - `agent.showResources` remains a startup-only setting and is not shown as a runtime option.
 - This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.
@@ -461,6 +461,11 @@ When the ACP agent advertises HTTP MCP support, `wechat-acp` injects a local
 created under the configured working directory, and the bridge sends that
 snapshot back as a WeChat file message. Files whose type is a supported image
 are delivered as native WeChat images instead of file cards.
+
+Tool calls may also expose intermediate screenshots or video frames as inline
+images. Use `--hide-images` or `agent.showImages: false` to suppress them.
+Images that the agent explicitly emits in its response or sends through an
+attached `resource_link` are always sent.
 
 The MCP server listens only on a random `127.0.0.1` port, requires a
 process-local bearer token, rejects browser-origin requests, and only reads

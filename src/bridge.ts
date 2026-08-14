@@ -65,7 +65,7 @@ const RUNTIME_BRIDGE_CONFIG_OPTIONS: ReadonlyArray<{
 }> = [
   { id: "bridge.thoughts", setting: "thoughts", name: "Thoughts" },
   { id: "bridge.diffs", setting: "diffs", name: "Diffs" },
-  { id: "bridge.images", setting: "images", name: "Images" },
+  { id: "bridge.images", setting: "images", name: "Tool Images" },
   { id: "bridge.audio", setting: "audio", name: "Audio" },
 ];
 

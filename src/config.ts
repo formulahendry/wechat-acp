@@ -132,9 +132,9 @@ export interface WeChatAcpConfig {
     showThoughts: boolean;
     showDiffs?: boolean;
     /**
-     * Render agent-produced ACP `image` content blocks as native WeChat
-     * image messages. Defaults to `true`; set to `false` (or pass
-     * `--hide-images`) to drop them.
+     * Render inline images produced inside ACP tool calls. Defaults to `true`;
+     * set to `false` (or pass `--hide-images`) to suppress intermediate tool
+     * images. Explicit agent message images and attachments are always sent.
      */
     showImages?: boolean;
     /**
