@@ -327,12 +327,19 @@ Examples:
 /acp-config set model gpt-5-mini
 /acp-config set mode plan
 /acp-config set reasoning_effort low
+/acp-config set bridge.thoughts off
+/acp-config set bridge.diffs on
+/acp-config set bridge.images off
+/acp-config set bridge.audio off
 ```
 
 Notes:
 
 - The command only works after the WeChat user already has an active ACP session. If not, send a normal message first so the session is created.
-- Available `configId` values come directly from the ACP agent's `configOptions`, so the exact list depends on the configured agent.
+- Agent-specific `configId` values come from the ACP agent's `configOptions`, so that part of the list depends on the configured agent.
+- The built-in `bridge.thoughts`, `bridge.diffs`, `bridge.images`, and `bridge.audio` options control output forwarding for the current WeChat user's session. They use the startup config as defaults, accept `on` or `off`, and are not persisted across session resets or bridge restarts.
+- Runtime bridge changes take effect on the next agent turn. They do not change a turn that is already running.
+- `agent.showResources` remains a startup-only setting and is not shown as a runtime option.
 - This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.
 - You can give this command your own aliases via `commandAliases` (see [Customizing bridge command names](#customizing-bridge-command-names-aliases)).
 
@@ -538,7 +545,7 @@ WECHAT_ACP_TELEMETRY=0 npx wechat-acp --agent copilot
 - `message.received` — message arrived; only the categorical kind (`text` / `image` / `voice` / `file` / `video` / `empty`) and a hashed user id
 - `message.injected` — local injection queued for processing; only target kind (`last-active-user` / `explicit`) and a hashed user id
 - `command.acp_config.view` — `/acp-config` invoked to list options; whether a session exists and the option count
-- `command.acp_config.set` — `/acp-config set` succeeded; `configId`, option type (`select` / `boolean`), and the resolved option value (all from the agent's declared `configOptions`, never the user's raw input)
+- `command.acp_config.set`: `/acp-config set` succeeded; `configId`, option type (`select` / `boolean`), and the resolved option value (from either a built-in bridge option or the agent's declared `configOptions`, never the user's raw input)
 - `command.acp_cancel` — `/acp-cancel` invoked; whether the queue was drained, whether an in-flight turn was actually cancelled, and how many queued messages were dropped
 - `command.buffer_start` — `/acp-prompt-start` invoked to enter buffering mode
 - `command.buffer_done` — `/acp-prompt-done` invoked to flush buffer; number of content blocks collected

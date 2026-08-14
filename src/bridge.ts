@@ -17,6 +17,7 @@ import type { WeixinMessage } from "./weixin/types.js";
 import {
   SessionManager,
   type ResetSessionResult,
+  type RuntimeBridgeSetting,
 } from "./acp/session.js";
 import { AUDIO_MIME_EXTENSIONS } from "./acp/client.js";
 import type { AgentImage, AgentAudio, AgentFile } from "./acp/client.js";
@@ -57,6 +58,16 @@ const PENDING_TEXT_TTL_MS = 10 * 60 * 1000;
 const PENDING_TEXT_MAX_SEGMENTS = 50;
 const SEGMENT_SEND_MAX_ATTEMPTS = 3;
 const SEGMENT_SEND_RETRY_BASE_MS = 300;
+const RUNTIME_BRIDGE_CONFIG_OPTIONS: ReadonlyArray<{
+  id: string;
+  setting: RuntimeBridgeSetting;
+  name: string;
+}> = [
+  { id: "bridge.thoughts", setting: "thoughts", name: "Thoughts" },
+  { id: "bridge.diffs", setting: "diffs", name: "Diffs" },
+  { id: "bridge.images", setting: "images", name: "Images" },
+  { id: "bridge.audio", setting: "audio", name: "Audio" },
+];
 
 interface MessageBuffer {
   blocks: acp.ContentBlock[];
@@ -679,12 +690,15 @@ export class WeChatAcpBridge {
     const args = command.trim().split(/\s+/);
     if (args.length === 1) {
       const configOptions = this.sessionManager?.getSessionConfigOptions(userId);
+      const runtimeSettings = this.sessionManager?.getRuntimeBridgeSettings(userId);
       trackEvent(
         "command.acp_config.view",
         {
           userIdHash: hashUserId(userId),
-          hasSession: !!configOptions,
-          optionCount: configOptions?.length ?? 0,
+          hasSession: !!runtimeSettings,
+          optionCount: runtimeSettings
+            ? RUNTIME_BRIDGE_CONFIG_OPTIONS.length + (configOptions?.length ?? 0)
+            : 0,
         },
         hashUserId(userId),
       );
@@ -701,26 +715,52 @@ export class WeChatAcpBridge {
       const configId = args[2]!;
       const rawValue = args.slice(3).join(" ");
       try {
-        const resolved = this.resolveAcpConfigValue(userId, configId, rawValue);
-        await this.sessionManager!.setSessionConfigOption(userId, configId, resolved.rawValue);
+        const runtimeOption = RUNTIME_BRIDGE_CONFIG_OPTIONS.find(
+          (option) => option.id === configId,
+        );
+        let displayValue: string;
+        let optionType: string;
+        if (runtimeOption) {
+          if (!this.sessionManager?.getRuntimeBridgeSettings(userId)) {
+            throw new Error(
+              "No active ACP session for this chat yet. Send a normal message first.",
+            );
+          }
+          const value = this.resolveBooleanConfigValue(configId, rawValue);
+          this.sessionManager.setRuntimeBridgeSetting(
+            userId,
+            runtimeOption.setting,
+            value,
+          );
+          displayValue = value ? "on" : "off";
+          optionType = "boolean";
+        } else {
+          const resolved = this.resolveAcpConfigValue(userId, configId, rawValue);
+          await this.sessionManager!.setSessionConfigOption(
+            userId,
+            configId,
+            resolved.rawValue,
+          );
+          displayValue = resolved.displayValue;
+          optionType = this.sessionManager!
+            .getSessionConfigOptions(userId)
+            ?.find((option) => option.id === configId)?.type ?? "unknown";
+        }
         if (!this.isMessageGenerationCurrent(userId, generation)) return;
-        const optionType = this.sessionManager!
-          .getSessionConfigOptions(userId)
-          ?.find((o) => o.id === configId)?.type;
         trackEvent(
           "command.acp_config.set",
           {
             userIdHash: hashUserId(userId),
             configId,
-            optionType: optionType ?? "unknown",
-            optionValue: resolved.displayValue,
+            optionType,
+            optionValue: displayValue,
           },
           hashUserId(userId),
         );
         await this.sendReply(
           userId,
           contextToken,
-          `✅ Updated ACP config: ${configId} = ${resolved.displayValue}\n\n${this.formatAcpConfigList(userId)}`,
+          `✅ Updated ACP config: ${configId} = ${displayValue}\n\n${this.formatAcpConfigList(userId)}`,
         );
       } catch (err) {
         if (!this.isMessageGenerationCurrent(userId, generation)) return;
@@ -1653,29 +1693,41 @@ export class WeChatAcpBridge {
 
   private formatAcpConfigList(userId: string): string {
     const configOptions = this.sessionManager?.getSessionConfigOptions(userId);
-    if (!configOptions) {
+    const runtimeSettings = this.sessionManager?.getRuntimeBridgeSettings(userId);
+    if (!runtimeSettings) {
       return this.formatAcpConfigUsage(
         "No active ACP session for this chat yet. Send a normal message first.",
       );
     }
-    if (configOptions.length === 0) {
-      return this.formatAcpConfigUsage(
-        "The current ACP agent does not expose any configurable session options.",
-      );
-    }
 
     const lines: string[] = [];
+    lines.push("⚙️ **Runtime Bridge Config**");
+    lines.push("━━━━━━━━━━━━━━━━");
+
+    for (const option of RUNTIME_BRIDGE_CONFIG_OPTIONS) {
+      lines.push("");
+      lines.push(`📌 **${option.name}**  (id: \`${option.id}\`)`);
+      lines.push(`   • Current: ${runtimeSettings[option.setting] ? "on" : "off"}`);
+      lines.push("   • Options: on | off");
+    }
+
+    lines.push("");
     lines.push("⚙️ **ACP Session Config**");
     lines.push("━━━━━━━━━━━━━━━━");
 
-    for (const option of configOptions) {
+    if (!configOptions || configOptions.length === 0) {
       lines.push("");
-      lines.push(`📌 **${option.name}**  (id: \`${option.id}\`)`);
-      lines.push(`   • Current: ${this.describeCurrentConfigValue(option)}`);
-      if (option.type === "select") {
-        lines.push(`   • Options: ${this.listConfigOptionChoices(option).join(" | ")}`);
-      } else if (option.type === "boolean") {
-        lines.push(`   • Options: true | false`);
+      lines.push("The current ACP agent does not expose any configurable session options.");
+    } else {
+      for (const option of configOptions) {
+        lines.push("");
+        lines.push(`📌 **${option.name}**  (id: \`${option.id}\`)`);
+        lines.push(`   • Current: ${this.describeCurrentConfigValue(option)}`);
+        if (option.type === "select") {
+          lines.push(`   • Options: ${this.listConfigOptionChoices(option).join(" | ")}`);
+        } else if (option.type === "boolean") {
+          lines.push(`   • Options: true | false`);
+        }
       }
     }
 
@@ -1729,14 +1781,8 @@ export class WeChatAcpBridge {
     }
 
     if (option.type === "boolean") {
-      const normalized = rawValue.trim().toLowerCase();
-      if (["true", "on", "1", "yes"].includes(normalized)) {
-        return { rawValue: true, displayValue: "true" };
-      }
-      if (["false", "off", "0", "no"].includes(normalized)) {
-        return { rawValue: false, displayValue: "false" };
-      }
-      throw new Error(`Invalid boolean value for ${configId}: ${rawValue}`);
+      const value = this.resolveBooleanConfigValue(configId, rawValue);
+      return { rawValue: value, displayValue: String(value) };
     }
 
     const candidates = this.flattenSelectOptions(option.options).filter((choice) =>
@@ -1756,6 +1802,17 @@ export class WeChatAcpBridge {
       rawValue: match.value,
       displayValue: this.describeConfigChoice(match),
     };
+  }
+
+  private resolveBooleanConfigValue(configId: string, rawValue: string): boolean {
+    const normalized = rawValue.trim().toLowerCase();
+    if (["true", "on", "1", "yes"].includes(normalized)) {
+      return true;
+    }
+    if (["false", "off", "0", "no"].includes(normalized)) {
+      return false;
+    }
+    throw new Error(`Invalid boolean value for ${configId}: ${rawValue}`);
   }
 
   private flattenSelectOptions(
