@@ -337,7 +337,7 @@ Notes:
 
 - The command only works after the WeChat user already has an active ACP session. If not, send a normal message first so the session is created.
 - Agent-specific `configId` values come from the ACP agent's `configOptions`, so that part of the list depends on the configured agent.
-- The built-in `bridge.thoughts`, `bridge.diffs`, `bridge.images`, and `bridge.audio` options control output forwarding for the current WeChat user's session. They use the startup config as defaults, accept `on` or `off`, and are not persisted across session resets or bridge restarts.
+- The built-in `bridge.thoughts`, `bridge.diffs`, and `bridge.audio` options control output forwarding for the current WeChat user's session. `bridge.images` controls only inline tool images; explicit response images and attached `resource_link` images are always sent. These options use the startup config as defaults, accept `on` or `off`, and are not persisted across session resets or bridge restarts.
 - Runtime bridge changes take effect on the next agent turn. They do not change a turn that is already running.
 - `agent.showResources` remains a startup-only setting and is not shown as a runtime option.
 - This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.

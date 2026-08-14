@@ -456,16 +456,17 @@ test("acp-config updates runtime bridge settings without calling the agent", asy
 
   await bridge.handleMessage(
     textMessage(
-      `${BRIDGE_COMMANDS.acpConfig} set bridge.diffs on`,
+      `${BRIDGE_COMMANDS.acpConfig} set bridge.images off`,
       "context-config",
     ),
   );
 
-  assert.deepEqual(updates, [{ setting: "diffs", value: true }]);
+  assert.deepEqual(updates, [{ setting: "images", value: false }]);
   assert.equal(bridge.enqueued.length, 0);
   assert.ok(
     bridge.sent.some(({ segment }) =>
-      segment.includes("bridge.diffs = on") &&
+      segment.includes("bridge.images = off") &&
+      segment.includes("**Tool Images**") &&
       segment.includes("Runtime Bridge Config") &&
       segment.includes("ACP Session Config")
     ),
