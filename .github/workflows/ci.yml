@@ -18,3 +18,17 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: |
+          $tests = Get-ChildItem tests -Filter *.ts | ForEach-Object { $_.FullName }
+          node --import tsx/esm --test $tests

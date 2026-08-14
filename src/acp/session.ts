@@ -15,8 +15,10 @@ import {
 } from "./client.js";
 import type { AgentResourceLink } from "../artifacts/types.js";
 import {
+  hasAgentExited,
   spawnAgent,
   killAgentAndWait,
+  waitForAgentExit,
   AgentProcessCleanupError,
   type AgentProcessInfo,
 } from "./agent-manager.js";
@@ -635,8 +637,7 @@ export class SessionManager {
       this.invalidateExitedSessions(userId);
       this.sessions.set(userId, created);
       if (
-        created.agentInfo.process.exitCode !== null ||
-        created.agentInfo.process.signalCode !== null
+        hasAgentExited(created.agentInfo.process)
       ) {
         this.handleAgentExit(userId, created.agentInfo.process);
         throw created.closedError ??
@@ -976,7 +977,15 @@ export class SessionManager {
 
     // If agent process exits, clean up the session
     agentInfo.process.on("exit", () => {
-      this.handleAgentExit(userId, agentInfo.process);
+      void waitForAgentExit(agentInfo.process).then(
+        () => this.handleAgentExit(userId, agentInfo.process),
+        (err) => {
+          this.opts.log(
+            `[${userId}] Failed to wait for Windows agent process tree: ${String(err)}`,
+          );
+          this.handleAgentExit(userId, agentInfo.process);
+        },
+      );
     });
 
     sessionRef = {

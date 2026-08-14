@@ -9,6 +9,7 @@ import packageJson from "../../package.json" with { type: "json" };
 import type { WeChatAcpClient } from "./client.js";
 import type { SessionResumePolicy } from "../config.js";
 import { trackException } from "../telemetry/index.js";
+import type { WindowsJob } from "./windows-job.js";
 
 export type AgentSessionOutcome = "new" | "loaded" | "unsupported" | "not_found";
 
@@ -38,6 +39,7 @@ const uncertainWindowsProcessTrees = new WeakMap<
   ChildProcess,
   { error: unknown }
 >();
+const windowsJobs = new WeakMap<ChildProcess, WindowsJob>();
 
 export async function spawnAgent(params: {
   command: string;
@@ -68,7 +70,7 @@ export async function spawnAgent(params: {
   }
 
   // On Windows, shell mode avoids EINVAL/ENOENT for command shims like npx/claude/gemini.
-  const useShell = process.platform === "win32";
+  const useShell = requiresWindowsShell(command);
 
   log(`Spawning agent: ${command} ${args.join(" ")} (cwd: ${cwd}, shell=${useShell})`);
 
@@ -89,6 +91,19 @@ export async function spawnAgent(params: {
   proc.on("exit", (code, signal) => {
     log(`Agent process exited: code=${code} signal=${signal}`);
   });
+
+  if (process.platform === "win32") {
+    try {
+      const { createWindowsJob } = await import("./windows-job.js");
+      if (proc.pid === undefined) {
+        throw new Error("Cannot track Windows agent process without a process ID");
+      }
+      windowsJobs.set(proc, createWindowsJob(proc.pid));
+    } catch (err) {
+      killAgent(proc);
+      throw err;
+    }
+  }
 
   try {
     if (!proc.stdin || !proc.stdout) {
@@ -227,7 +242,23 @@ export async function spawnAgent(params: {
   }
 }
 
+function requiresWindowsShell(command: string): boolean {
+  return (
+    process.platform === "win32" &&
+    !command.toLowerCase().endsWith(".exe")
+  );
+}
+
 export function killAgent(proc: ChildProcess): void {
+  const windowsJob = windowsJobs.get(proc);
+  if (windowsJob) {
+    try {
+      windowsJob.terminate();
+    } finally {
+      windowsJob.close();
+    }
+    return;
+  }
   if (process.platform !== "win32" && proc.pid !== undefined) {
     const groupPid = proc.pid;
     try {
@@ -268,6 +299,16 @@ export async function killAgentAndWait(
 ): Promise<void> {
   const platform = options.platform ?? process.platform;
   if (platform === "win32") {
+    const windowsJob = windowsJobs.get(proc);
+    if (windowsJob) {
+      try {
+        windowsJob.terminate();
+        await windowsJob.waitForEmpty(timeoutMs);
+      } finally {
+        windowsJob.close();
+      }
+      return;
+    }
     const retainedFailure = uncertainWindowsProcessTrees.get(proc);
     const wrapperExited =
       proc.exitCode !== null || proc.signalCode !== null;
@@ -277,6 +318,7 @@ export async function killAgentAndWait(
       // taskkill failure leaves evidence that cleanup is uncertain.
       return;
     }
+
     if (proc.pid === undefined) {
       throw new Error("Cannot stop agent process tree without a process ID");
     }
@@ -330,6 +372,22 @@ export async function killAgentAndWait(
     if (timeout) clearTimeout(timeout);
     proc.off("exit", settle);
     proc.off("close", settle);
+  }
+}
+
+export function hasAgentExited(proc: ChildProcess): boolean {
+  const windowsJob = windowsJobs.get(proc);
+  if (windowsJob) return !windowsJob.hasActiveProcesses();
+  return proc.exitCode !== null || proc.signalCode !== null;
+}
+
+export async function waitForAgentExit(proc: ChildProcess): Promise<void> {
+  const windowsJob = windowsJobs.get(proc);
+  if (!windowsJob) return;
+  try {
+    await windowsJob.waitForEmpty(Number.POSITIVE_INFINITY);
+  } finally {
+    windowsJob.close();
   }
 }
 
