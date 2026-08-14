@@ -350,18 +350,27 @@ export class WeChatAcpClient implements acp.Client {
    * (issue 54). Residual undelivered buffers present at the boundary are
    * logged and discarded. Await this before sending the next prompt.
    */
-  async beginTurn(callbacks: {
-    sendTyping: () => Promise<void>;
-    onThoughtFlush: (text: string) => Promise<void>;
-    onMessageFlush: (text: string) => Promise<void>;
-    onImageFlush?: (image: AgentImage) => Promise<void>;
-    onAudioFlush?: (audio: AgentAudio) => Promise<void>;
-    onFileFlush?: (file: AgentFile) => Promise<void>;
-  }): Promise<void> {
+  async beginTurn(
+    callbacks: {
+      sendTyping: () => Promise<void>;
+      onThoughtFlush: (text: string) => Promise<void>;
+      onMessageFlush: (text: string) => Promise<void>;
+      onImageFlush?: (image: AgentImage) => Promise<void>;
+      onAudioFlush?: (audio: AgentAudio) => Promise<void>;
+      onFileFlush?: (file: AgentFile) => Promise<void>;
+    },
+    outputSettings?: {
+      showThoughts: boolean;
+      showDiffs: boolean;
+      showImages: boolean;
+      showAudio: boolean;
+    },
+  ): Promise<void> {
     return this.enqueue(async () => {
       const previous = this.turn;
       const opts: WeChatAcpClientOpts = {
         ...previous.opts,
+        ...outputSettings,
         sendTyping: callbacks.sendTyping,
         onThoughtFlush: callbacks.onThoughtFlush,
         onMessageFlush: callbacks.onMessageFlush,

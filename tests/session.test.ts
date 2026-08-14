@@ -170,6 +170,71 @@ test("session creation failures are surfaced to the WeChat user", async () => {
   ]);
 });
 
+test("runtime bridge settings are scoped to a session and applied at the next turn", async () => {
+  const appliedSettings: unknown[] = [];
+  const manager = new SessionManager({
+    agentCommand: "unused",
+    agentArgs: [],
+    agentCwd: process.cwd(),
+    idleTimeoutMs: 0,
+    maxConcurrentUsers: 1,
+    showThoughts: true,
+    showDiffs: false,
+    showImages: true,
+    showAudio: true,
+    log: () => {},
+    onReply: async () => {},
+    sendTyping: async () => {},
+  });
+  const session = makeTurnSession({
+    flushText: "",
+    producedMessage: true,
+    events: [],
+  });
+  session.client.beginTurn = async (_callbacks, settings) => {
+    appliedSettings.push(settings);
+  };
+  const internal = manager as unknown as {
+    sessions: Map<string, UserSession>;
+    processQueue(session: UserSession): Promise<void>;
+  };
+  internal.sessions.set(session.userId, session);
+
+  assert.deepEqual(manager.getRuntimeBridgeSettings(session.userId), {
+    thoughts: true,
+    diffs: false,
+    images: true,
+    audio: true,
+  });
+  manager.setRuntimeBridgeSetting(session.userId, "thoughts", false);
+  manager.setRuntimeBridgeSetting(session.userId, "diffs", true);
+  manager.setRuntimeBridgeSetting(session.userId, "images", false);
+  manager.setRuntimeBridgeSetting(session.userId, "audio", false);
+
+  await internal.processQueue(session);
+
+  assert.deepEqual(appliedSettings, [{
+    showThoughts: false,
+    showDiffs: true,
+    showImages: false,
+    showAudio: false,
+  }]);
+
+  const replacementSession = makeTurnSession({
+    flushText: "",
+    producedMessage: true,
+    events: [],
+  });
+  internal.sessions.set(session.userId, replacementSession);
+  assert.deepEqual(manager.getRuntimeBridgeSettings(session.userId), {
+    thoughts: true,
+    diffs: false,
+    images: true,
+    audio: true,
+  });
+  assert.equal(manager.getRuntimeBridgeSettings("other-user"), undefined);
+});
+
 function makeTurnSession(opts: {
   flushText: string;
   producedMessage: boolean;

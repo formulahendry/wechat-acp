@@ -84,6 +84,15 @@ export interface ResetSessionResult {
   droppedQueueCount: number;
 }
 
+export interface RuntimeBridgeSettings {
+  thoughts: boolean;
+  diffs: boolean;
+  images: boolean;
+  audio: boolean;
+}
+
+export type RuntimeBridgeSetting = keyof RuntimeBridgeSettings;
+
 export interface SessionMcpLease {
   mcpServer: acp.McpServer;
   close(): Promise<void>;
@@ -202,6 +211,7 @@ export class SessionManager {
   private resetOperations = new Map<string, Promise<ResetSessionResult>>();
   private cleanupStates = new Map<string, SessionCleanupState>();
   private cleanupOperations = new Map<string, Promise<void>>();
+  private runtimeBridgeSettings = new WeakMap<UserSession, RuntimeBridgeSettings>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private opts: SessionManagerOpts;
   private aborted = false;
@@ -364,6 +374,28 @@ export class SessionManager {
 
   getSessionConfigOptions(userId: string): acp.SessionConfigOption[] | undefined {
     return this.sessions.get(userId)?.configOptions;
+  }
+
+  getRuntimeBridgeSettings(userId: string): RuntimeBridgeSettings | undefined {
+    const session = this.sessions.get(userId);
+    if (!session) return undefined;
+    return { ...this.getOrCreateRuntimeBridgeSettings(session) };
+  }
+
+  setRuntimeBridgeSetting(
+    userId: string,
+    setting: RuntimeBridgeSetting,
+    value: boolean,
+  ): RuntimeBridgeSettings {
+    const session = this.sessions.get(userId);
+    if (!session) {
+      throw new Error("No active ACP session for this chat yet. Send a normal message first.");
+    }
+
+    session.lastActivity = Date.now();
+    const settings = this.getOrCreateRuntimeBridgeSettings(session);
+    settings[setting] = value;
+    return { ...settings };
   }
 
   async setSessionConfigOption(
@@ -1029,6 +1061,7 @@ export class SessionManager {
           // prompt() rejected early) delivers with its own turn's callbacks
           // before the swap, and residual undelivered buffers are discarded at
           // the boundary instead of leaking into this turn (issue 54).
+          const outputSettings = { ...this.getOrCreateRuntimeBridgeSettings(session) };
           const beginTurn = session.client.beginTurn({
             sendTyping: () =>
               this.runIfCurrent(session, () =>
@@ -1101,6 +1134,11 @@ export class SessionManager {
                     ),
                 }
               : {}),
+          }, {
+            showThoughts: outputSettings.thoughts,
+            showDiffs: outputSettings.diffs,
+            showImages: outputSettings.images,
+            showAudio: outputSettings.audio,
           });
           await this.awaitAgentOperation(
             session,
@@ -1502,5 +1540,21 @@ export class SessionManager {
       this.opts.log(`[${session.userId}] Failed to persist ACP session: ${String(err)}`);
       trackException(err, "session.persistence", hashUserId(session.userId));
     }
+  }
+
+  private getOrCreateRuntimeBridgeSettings(
+    session: UserSession,
+  ): RuntimeBridgeSettings {
+    let settings = this.runtimeBridgeSettings.get(session);
+    if (!settings) {
+      settings = {
+        thoughts: this.opts.showThoughts,
+        diffs: this.opts.showDiffs ?? false,
+        images: this.opts.showImages ?? true,
+        audio: this.opts.showAudio ?? true,
+      };
+      this.runtimeBridgeSettings.set(session, settings);
+    }
+    return settings;
   }
 }

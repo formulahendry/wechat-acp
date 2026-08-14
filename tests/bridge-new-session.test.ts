@@ -373,11 +373,23 @@ test("a config update that finishes after reset cannot send a stale reply", asyn
     bridge as unknown as {
       sessionManager: {
         getSessionConfigOptions(): typeof option[];
+        getRuntimeBridgeSettings(): {
+          thoughts: boolean;
+          diffs: boolean;
+          images: boolean;
+          audio: boolean;
+        };
         setSessionConfigOption(): Promise<typeof option[]>;
       };
     }
   ).sessionManager = {
     getSessionConfigOptions: () => [option],
+    getRuntimeBridgeSettings: () => ({
+      thoughts: true,
+      diffs: false,
+      images: true,
+      audio: true,
+    }),
     setSessionConfigOption: async () => {
       updateStarted();
       await finished;
@@ -404,6 +416,59 @@ test("a config update that finishes after reset cannot send a stale reply", asyn
   );
   assert.ok(
     bridge.sent.some(({ segment }) => segment.includes("ACP session cleared")),
+  );
+});
+
+test("acp-config updates runtime bridge settings without calling the agent", async () => {
+  const bridge = makeBridge();
+  const settings = {
+    thoughts: true,
+    diffs: false,
+    images: true,
+    audio: true,
+  };
+  const updates: Array<{ setting: string; value: boolean }> = [];
+  (
+    bridge as unknown as {
+      sessionManager: {
+        getSessionConfigOptions(): [];
+        getRuntimeBridgeSettings(): typeof settings;
+        setRuntimeBridgeSetting(
+          userId: string,
+          setting: keyof typeof settings,
+          value: boolean,
+        ): typeof settings;
+        setSessionConfigOption(): Promise<never>;
+      };
+    }
+  ).sessionManager = {
+    getSessionConfigOptions: () => [],
+    getRuntimeBridgeSettings: () => ({ ...settings }),
+    setRuntimeBridgeSetting: (_userId, setting, value) => {
+      settings[setting] = value;
+      updates.push({ setting, value });
+      return { ...settings };
+    },
+    setSessionConfigOption: async () => {
+      throw new Error("agent config must not be called");
+    },
+  };
+
+  await bridge.handleMessage(
+    textMessage(
+      `${BRIDGE_COMMANDS.acpConfig} set bridge.diffs on`,
+      "context-config",
+    ),
+  );
+
+  assert.deepEqual(updates, [{ setting: "diffs", value: true }]);
+  assert.equal(bridge.enqueued.length, 0);
+  assert.ok(
+    bridge.sent.some(({ segment }) =>
+      segment.includes("bridge.diffs = on") &&
+      segment.includes("Runtime Bridge Config") &&
+      segment.includes("ACP Session Config")
+    ),
   );
 });
 
