@@ -772,6 +772,35 @@ test("text resource attachment preserves a long basename and extension", async (
   );
 });
 
+test("text resource attachment preserves image MIME without native image routing", async () => {
+  const files: AgentFile[] = [];
+  const images: AgentImage[] = [];
+  const client = makeClient({
+    onFileFlush: async (file) => { files.push(file); },
+    onImageFlush: async (image) => { images.push(image); },
+  });
+
+  await emitToolCallResource(client, {
+    uri: "file:///workspace/vector.svg",
+    mimeType: "image/svg+xml",
+    text: `<svg>${"x".repeat(1001)}</svg>`,
+  });
+  await emitToolCallResource(client, {
+    uri: "file:///workspace/declared.png",
+    mimeType: "image/png",
+    text: "x".repeat(1001),
+  });
+
+  assert.deepEqual(
+    files.map(({ name, mimeType }) => ({ name, mimeType })),
+    [
+      { name: "vector.svg", mimeType: "image/svg+xml" },
+      { name: "declared.png", mimeType: "image/png" },
+    ],
+  );
+  assert.equal(images.length, 0);
+});
+
 test("resourceInlineLimit=0 delivers every non-empty text resource as a file", async () => {
   const files: AgentFile[] = [];
   const client = makeClient({

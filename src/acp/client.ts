@@ -937,6 +937,7 @@ export class WeChatAcpClient implements acp.Client {
     file: AgentFile,
     turn: TurnState,
     source: ImageSource,
+    delivery?: { allowNativeImage?: boolean },
   ): Promise<boolean> {
     const opts = turn.opts;
     const fileName = sanitizeFileName(file.name);
@@ -944,12 +945,19 @@ export class WeChatAcpClient implements acp.Client {
     const mimeType =
       sanitizeInlineLabel(file.mimeType).split(";")[0].trim().toLowerCase() ||
       "application/octet-stream";
-    if (source === "tool" && opts.showImages === false && mimeType.startsWith("image/")) {
+    const allowNativeImage = delivery?.allowNativeImage ?? true;
+    if (
+      allowNativeImage &&
+      source === "tool" &&
+      opts.showImages === false &&
+      mimeType.startsWith("image/")
+    ) {
       opts.log(`[file] skipped tool image (showImages=false, ${label})`);
       return true;
     }
     const decodedBytes = decodedBase64ByteLength(file.data);
     if (
+      allowNativeImage &&
       (source !== "tool" || opts.showImages !== false) &&
       opts.onImageFlush &&
       SUPPORTED_IMAGE_MIME_TYPES.has(mimeType) &&
@@ -1171,10 +1179,7 @@ export class WeChatAcpClient implements acp.Client {
           .split(";")[0]
           .trim()
           .toLowerCase();
-        const resolvedMime = declaredMime || inferMimeType(attachmentName);
-        const mimeType = resolvedMime.startsWith("image/")
-          ? "text/plain"
-          : resolvedMime;
+        const mimeType = declaredMime || inferMimeType(attachmentName);
         opts.log(
           `[resource] attaching text resource ${name} (${resource.text.length} chars > ${inlineLimit})`,
         );
@@ -1186,6 +1191,7 @@ export class WeChatAcpClient implements acp.Client {
           },
           turn,
           source,
+          { allowNativeImage: false },
         );
         return false;
       }
