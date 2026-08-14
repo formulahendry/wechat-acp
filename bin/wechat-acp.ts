@@ -83,7 +83,7 @@ Options:
                       Send a standalone message after each completed agent turn
   --hide-thoughts     Do not forward agent thinking to WeChat (default: forwarded)
   --show-diffs        Forward ACP file diffs to WeChat (default: hidden)
-  --hide-images       Do not forward agent image output to WeChat (default: forwarded)
+  --hide-images       Do not forward intermediate inline tool images to WeChat
   --hide-audio        Do not forward agent audio output to WeChat (default: forwarded)
   --hide-resources    Do not forward agent embedded resources to WeChat (default: forwarded)
   --text <text>       Message text for "inject"

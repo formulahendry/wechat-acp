@@ -477,7 +477,7 @@ test("text before an image is flushed first so ordering is preserved", async () 
   assert.equal(tail, "anything else?");
 });
 
-test("showImages=false drops images without calling the sink", async () => {
+test("showImages=false drops tool images without calling the sink", async () => {
   const images: AgentImage[] = [];
   const client = makeClient({
     onImageFlush: async (img) => { images.push(img); },
@@ -490,6 +490,79 @@ test("showImages=false drops images without calling the sink", async () => {
   assert.equal(images.length, 0);
   assert.equal(client.hasProducedMessage, false);
   assert.equal(await client.flush(), "", "no placeholder for intentionally hidden images");
+});
+
+test("showImages=false hides tool images but keeps explicit agent images", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({
+    onImageFlush: async (img) => { images.push(img); },
+    showImages: false,
+  });
+  client.newTurn();
+
+  await emitToolCallImage(client, { data: PNG_BASE64, mimeType: "image/png" });
+  await emitToolCallRawOutputImage(client, {
+    binaryResultsForLlm: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }],
+  });
+  await emitMessageChunkImage(client, { data: PNG_BASE64, mimeType: "image/jpeg" });
+
+  assert.deepEqual(images, [{ data: PNG_BASE64, mimeType: "image/jpeg" }]);
+  assert.equal(client.hasProducedMessage, true, "explicit agent image counts as output");
+});
+
+test("showImages=false drops tool image resources without file fallback", async () => {
+  const images: AgentImage[] = [];
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    onImageFlush: async (img) => { images.push(img); },
+    onFileFlush: async (file) => { files.push(file); },
+    showImages: false,
+  });
+  client.newTurn();
+
+  await emitToolCallResource(client, {
+    uri: "file:///frame.png",
+    mimeType: "image/png",
+    blob: PNG_BASE64,
+  });
+
+  assert.equal(images.length, 0);
+  assert.equal(files.length, 0);
+  assert.equal(client.hasProducedMessage, false);
+  assert.equal(await client.flush(), "");
+});
+
+test("showImages=false keeps explicit image resource links", async () => {
+  const images: AgentImage[] = [];
+  const client = makeClient({
+    resolveResourceLink: async () => ({
+      data: PNG_BASE64,
+      name: "requested-frame.png",
+      mimeType: "image/png",
+    }),
+    onImageFlush: async (img) => { images.push(img); },
+    showImages: false,
+  });
+  client.newTurn();
+
+  await client.sessionUpdate({
+    update: {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-attachment-1",
+      status: "completed",
+      content: [{
+        type: "content",
+        content: {
+          type: "resource_link",
+          uri: "wechat-acp://artifact/requested-frame",
+          name: "requested-frame.png",
+          mimeType: "image/png",
+        },
+      }],
+    },
+  } as never);
+
+  assert.deepEqual(images, [{ data: PNG_BASE64, mimeType: "image/png" }]);
 });
 
 test("unsupported mime type is skipped silently", async () => {
@@ -982,7 +1055,7 @@ test("padded image at the decoded limit falls back to file delivery", async () =
   assert.equal(files[0].name, "limit.png");
 });
 
-test("image resource_link falls back to file delivery when images are hidden", async () => {
+test("image resource_link remains a native image when tool images are hidden", async () => {
   const images: AgentImage[] = [];
   const files: AgentFile[] = [];
   const client = makeClient({
@@ -1012,10 +1085,8 @@ test("image resource_link falls back to file delivery when images are hidden", a
     },
   } as never);
 
-  assert.equal(images.length, 0);
-  assert.deepEqual(files, [
-    { data: PNG_BASE64, name: "hidden-image.jpg", mimeType: "image/jpeg" },
-  ]);
+  assert.deepEqual(images, [{ data: PNG_BASE64, mimeType: "image/jpeg" }]);
+  assert.equal(files.length, 0);
 });
 
 test("completed tool_call resource_link is delivered for Codex-style output", async () => {
@@ -1292,7 +1363,7 @@ test("unsupported image blob resource falls back to the placeholder instead of v
   assert.match(text, /📎 \[resource: scan\.tiff \(image\/tiff, ~\d+ bytes\) - binary content not rendered\]/);
 });
 
-test("image blob resource with showImages=false surfaces as a placeholder, not a silent drop", async () => {
+test("explicit image blob resource remains visible when tool images are hidden", async () => {
   const images: AgentImage[] = [];
   const client = makeClient({
     onImageFlush: async (img) => { images.push(img); },
@@ -1300,16 +1371,15 @@ test("image blob resource with showImages=false surfaces as a placeholder, not a
   });
   client.newTurn();
 
-  await emitToolCallResource(client, {
+  await emitMessageChunkResource(client, {
     uri: "file:///chart.png",
     mimeType: "image/png",
     blob: PNG_BASE64,
   });
 
-  assert.equal(images.length, 0, "hidden images must not hit the image sink");
-  assert.equal(client.hasProducedMessage, true, "resource-only turn still counts as produced output");
-  const text = await client.flush();
-  assert.match(text, /📎 \[resource: chart\.png \(image\/png, ~\d+ bytes\) - binary content not rendered\]/);
+  assert.deepEqual(images, [{ data: PNG_BASE64, mimeType: "image/png" }]);
+  assert.equal(client.hasProducedMessage, true);
+  assert.equal(await client.flush(), "");
 });
 
 test("image blob resource without an image sink surfaces as a placeholder", async () => {
