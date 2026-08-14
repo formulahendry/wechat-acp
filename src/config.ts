@@ -8,6 +8,9 @@ import crypto from "node:crypto";
 
 export type SessionResumePolicy = "off" | "auto" | "required";
 
+export const DEFAULT_RESOURCE_INLINE_LIMIT = 1000;
+export const MAX_RESOURCE_INLINE_LIMIT = 4000;
+
 export interface AgentCommandConfig {
   command: string;
   args: string[];
@@ -144,13 +147,21 @@ export interface WeChatAcpConfig {
      */
     showAudio?: boolean;
     /**
-     * Render agent-produced ACP embedded `resource` content blocks in
-     * WeChat: text resources inline as fenced code blocks, image blobs
-     * through the image pipeline, other blobs as a one-line placeholder.
+     * Render intermediate ACP tool `resource` output in WeChat: text resources
+     * inline as fenced code blocks, image blobs through the image pipeline,
+     * other blobs as a one-line placeholder. Explicit agent resources and
+     * files sent through the bridge artifact tool are always delivered.
      * Defaults to `true`; set to `false` (or pass `--hide-resources`)
-     * to drop them.
+     * to drop them. Active sessions can override this with
+     * `bridge.resources` through `/acp-config`.
      */
     showResources?: boolean;
+    /**
+     * Maximum tool text-resource length to render inline. Longer resources
+     * are sent as file attachments. Set to `0` to attach every non-empty tool
+     * text resource. Defaults to 1000 characters.
+     */
+    resourceInlineLimit?: number;
   };
   agents: Record<string, AgentPreset>;
   session: {
@@ -235,6 +246,7 @@ export function defaultConfig(opts?: { instance?: string }): WeChatAcpConfig {
       showImages: true,
       showAudio: true,
       showResources: true,
+      resourceInlineLimit: DEFAULT_RESOURCE_INLINE_LIMIT,
     },
     agents: { ...BUILT_IN_AGENTS },
     session: {
@@ -264,6 +276,21 @@ export function parseSessionResumePolicy(value: unknown): SessionResumePolicy {
   throw new Error(
     `Invalid session resume policy: ${JSON.stringify(value)}. ` +
       'Expected "off", "auto", or "required".',
+  );
+}
+
+export function parseResourceInlineLimit(value: unknown): number {
+  if (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_RESOURCE_INLINE_LIMIT
+  ) {
+    return value;
+  }
+  throw new Error(
+    `Invalid resource inline limit: ${JSON.stringify(value)}. ` +
+      `Expected an integer from 0 to ${MAX_RESOURCE_INLINE_LIMIT}.`,
   );
 }
 

@@ -36,6 +36,7 @@ function makeClient(opts: {
   showImages?: boolean;
   showAudio?: boolean;
   showResources?: boolean;
+  resourceInlineLimit?: number;
   sendDelay?: number;
   log?: (msg: string) => void;
 }): WeChatAcpClient {
@@ -63,6 +64,7 @@ function makeClient(opts: {
     showImages: opts.showImages,
     showAudio: opts.showAudio,
     showResources: opts.showResources,
+    resourceInlineLimit: opts.resourceInlineLimit,
   });
 }
 
@@ -723,6 +725,44 @@ test("text resource in completed tool_call_update renders as a fenced block with
   assert.equal(client.hasProducedMessage, true, "resource-only turn counts as produced output");
 });
 
+test("text resource above the inline limit is delivered as a file attachment", async () => {
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    onFileFlush: async (file) => { files.push(file); },
+  });
+  const body = JSON.stringify({ content: "x".repeat(1000) });
+
+  await emitToolCallResource(client, {
+    uri: "file:///package.json",
+    mimeType: "application/json; charset=utf-8",
+    text: body,
+  });
+
+  assert.equal(await client.flush(), "");
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "package.json");
+  assert.equal(files[0].mimeType, "application/json");
+  assert.equal(Buffer.from(files[0].data, "base64").toString("utf8"), body);
+  assert.equal(client.hasProducedMessage, true);
+});
+
+test("resourceInlineLimit=0 delivers every non-empty text resource as a file", async () => {
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    resourceInlineLimit: 0,
+    onFileFlush: async (file) => { files.push(file); },
+  });
+
+  await emitToolCallResource(client, {
+    uri: "file:///note.txt",
+    text: "short",
+  });
+
+  assert.equal(await client.flush(), "");
+  assert.equal(files.length, 1);
+  assert.equal(Buffer.from(files[0].data, "base64").toString("utf8"), "short");
+});
+
 test("text resource in agent_message_chunk renders in stream order with surrounding text", async () => {
   const flushed: string[] = [];
   const client = makeClient({ onMessageFlush: async (t) => { flushed.push(t); } });
@@ -762,7 +802,7 @@ test("resource fence language falls back to the file extension when MIME is abse
 });
 
 test("oversized text resource truncates with an explicit tail inside the fence", async () => {
-  const client = makeClient({});
+  const client = makeClient({ resourceInlineLimit: Number.MAX_SAFE_INTEGER });
 
   const body = "x".repeat(4000 + 1234);
   await emitToolCallResource(client, { uri: "file:///big.txt", text: body });
@@ -775,7 +815,7 @@ test("oversized text resource truncates with an explicit tail inside the fence",
 });
 
 test("oversized resource with long name and MIME still fits one segment", async () => {
-  const client = makeClient({});
+  const client = makeClient({ resourceInlineLimit: Number.MAX_SAFE_INTEGER });
 
   const name = "a".repeat(300) + ".txt";
   await emitToolCallResource(client, {
@@ -1055,11 +1095,12 @@ test("padded image at the decoded limit falls back to file delivery", async () =
   assert.equal(files[0].name, "limit.png");
 });
 
-test("image resource_link remains a native image when tool images are hidden", async () => {
+test("attach_file image remains native when tool images and resources are hidden", async () => {
   const images: AgentImage[] = [];
   const files: AgentFile[] = [];
   const client = makeClient({
     showImages: false,
+    showResources: false,
     resolveResourceLink: async () => ({
       data: PNG_BASE64,
       name: "hidden-image.jpg",
@@ -1073,17 +1114,14 @@ test("image resource_link remains a native image when tool images are hidden", a
     },
   });
 
-  await client.sessionUpdate({
-    update: {
-      sessionUpdate: "agent_message_chunk",
-      content: {
-        type: "resource_link",
-        uri: "wechat-acp://artifact/hidden-image",
-        name: "hidden-image.jpg",
-        mimeType: "image/jpeg",
-      },
-    },
-  } as never);
+  await emitToolCallRawOutputImage(client, {
+    contents: [{
+      type: "resource_link",
+      uri: "wechat-acp://artifact/hidden-image",
+      name: "hidden-image.jpg",
+      mimeType: "image/jpeg",
+    }],
+  });
 
   assert.deepEqual(images, [{ data: PNG_BASE64, mimeType: "image/jpeg" }]);
   assert.equal(files.length, 0);
@@ -1163,7 +1201,7 @@ test("resource_link in tool_call_update preserves text-before-file ordering", as
   assert.deepEqual(order, ["text:before", "file:output.txt"]);
 });
 
-test("showResources=false does not resolve or deliver resource links", async () => {
+test("showResources=false keeps explicit agent resource links", async () => {
   let resolverCalls = 0;
   const files: AgentFile[] = [];
   const client = makeClient({
@@ -1171,8 +1209,8 @@ test("showResources=false does not resolve or deliver resource links", async () 
     resolveResourceLink: async () => {
       resolverCalls++;
       return {
-        data: Buffer.from("hidden").toString("base64"),
-        name: "hidden.txt",
+        data: Buffer.from("explicit").toString("base64"),
+        name: "explicit.txt",
         mimeType: "text/plain",
       };
     },
@@ -1186,14 +1224,76 @@ test("showResources=false does not resolve or deliver resource links", async () 
       sessionUpdate: "agent_message_chunk",
       content: {
         type: "resource_link",
-        uri: "wechat-acp://artifact/hidden",
-        name: "hidden.txt",
+        uri: "file:///workspace/explicit.txt",
+        name: "explicit.txt",
       },
     },
   } as never);
 
+  assert.equal(resolverCalls, 1);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "explicit.txt");
+  assert.equal(await client.flush(), "");
+});
+
+test("showResources=false hides ordinary tool resource links", async () => {
+  let resolverCalls = 0;
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    showResources: false,
+    resolveResourceLink: async () => {
+      resolverCalls++;
+      return {
+        data: Buffer.from("hidden").toString("base64"),
+        name: "hidden.txt",
+        mimeType: "text/plain",
+      };
+    },
+    onFileFlush: async (file) => { files.push(file); },
+  });
+
+  await emitToolCallRawOutputImage(client, {
+    contents: [{
+      type: "resource_link",
+      uri: "file:///workspace/hidden.txt",
+      name: "hidden.txt",
+      mimeType: "text/plain",
+    }],
+  });
+
   assert.equal(resolverCalls, 0);
   assert.equal(files.length, 0);
+  assert.equal(await client.flush(), "");
+});
+
+test("showResources=false keeps attach_file artifact links", async () => {
+  let resolverCalls = 0;
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    showResources: false,
+    resolveResourceLink: async () => {
+      resolverCalls++;
+      return {
+        data: Buffer.from("attachment").toString("base64"),
+        name: "attachment.txt",
+        mimeType: "text/plain",
+      };
+    },
+    onFileFlush: async (file) => { files.push(file); },
+  });
+
+  await emitToolCallRawOutputImage(client, {
+    contents: [{
+      type: "resource_link",
+      uri: "wechat-acp://artifact/attachment",
+      name: "attachment.txt",
+      mimeType: "text/plain",
+    }],
+  });
+
+  assert.equal(resolverCalls, 1);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, "attachment.txt");
   assert.equal(await client.flush(), "");
 });
 
@@ -1227,7 +1327,7 @@ test("hidden image resource_link suppresses the mirrored rawOutput image fallbac
         type: "content",
         content: {
           type: "resource_link",
-          uri: "wechat-acp://artifact/hidden-image",
+          uri: "file:///workspace/hidden-image.png",
           name: "hidden.png",
           mimeType: "image/png",
         },
@@ -1242,18 +1342,41 @@ test("hidden image resource_link suppresses the mirrored rawOutput image fallbac
 
 test("showResources=false drops resources without rendering", async () => {
   const images: AgentImage[] = [];
+  const files: AgentFile[] = [];
   const client = makeClient({
     onImageFlush: async (img) => { images.push(img); },
+    onFileFlush: async (file) => { files.push(file); },
     showResources: false,
   });
   client.newTurn();
 
-  await emitToolCallResource(client, { uri: "file:///a.txt", text: "hello" });
+  await emitToolCallResource(client, { uri: "file:///a.txt", text: "x".repeat(1001) });
   await emitToolCallResource(client, { uri: "file:///b.png", mimeType: "image/png", blob: PNG_BASE64 });
 
   assert.equal(images.length, 0);
+  assert.equal(files.length, 0);
   assert.equal(client.hasProducedMessage, false);
   assert.equal(await client.flush(), "", "no output for intentionally hidden resources");
+});
+
+test("showResources=false keeps explicit agent resources inline", async () => {
+  const files: AgentFile[] = [];
+  const client = makeClient({
+    showResources: false,
+    resourceInlineLimit: 0,
+    onFileFlush: async (file) => { files.push(file); },
+  });
+  const body = "x".repeat(1001);
+
+  await emitMessageChunkResource(client, {
+    uri: "file:///explicit.txt",
+    text: body,
+  });
+
+  const text = await client.flush();
+  assert.match(text, /📎 explicit\.txt/);
+  assert.match(text, new RegExp(`x{${body.length}}`));
+  assert.equal(files.length, 0);
 });
 
 test("empty text resource is skipped without rendering an empty fence", async () => {
@@ -1436,7 +1559,7 @@ test("MIME parameters do not defeat the fence language hint", async () => {
 });
 
 test("adversarial backtick run keeps the fence bounded and contained", async () => {
-  const client = makeClient({});
+  const client = makeClient({ resourceInlineLimit: Number.MAX_SAFE_INTEGER });
   client.newTurn();
 
   const body = "start\n" + "`".repeat(3000) + "\nend";

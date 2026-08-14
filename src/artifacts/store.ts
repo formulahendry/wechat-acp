@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import {
   AgentFile,
   AgentResourceLink,
+  ARTIFACT_RESOURCE_URI_PREFIX,
   MAX_AGENT_FILE_BYTES,
+  isArtifactResourceUri,
 } from "./types.js";
 
 const DEFAULT_TOTAL_BYTES = 100 * 1024 * 1024;
@@ -91,7 +93,7 @@ export class ArtifactStore {
       this.totalBytes += file.byteLength;
 
       return {
-        uri: `wechat-acp://artifact/${id}`,
+        uri: `${ARTIFACT_RESOURCE_URI_PREFIX}${id}`,
         name,
         mimeType,
         size: file.byteLength,
@@ -102,8 +104,8 @@ export class ArtifactStore {
   async resolveResourceLink(
     link: AgentResourceLink,
   ): Promise<AgentFile | null> {
-    if (link.uri.startsWith("wechat-acp://artifact/")) {
-      return this.consume(link.uri.slice("wechat-acp://artifact/".length));
+    if (isArtifactResourceUri(link.uri)) {
+      return this.consume(link.uri.slice(ARTIFACT_RESOURCE_URI_PREFIX.length));
     }
 
     let filePath: string;

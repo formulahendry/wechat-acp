@@ -12,7 +12,9 @@ import {
   type AgentFile,
   type AgentResourceLink,
   MAX_AGENT_FILE_BYTES,
+  isArtifactResourceUri,
 } from "../artifacts/types.js";
+import { DEFAULT_RESOURCE_INLINE_LIMIT } from "../config.js";
 import { TEXT_CHUNK_LIMIT } from "../weixin/send.js";
 
 export type { AgentFile } from "../artifacts/types.js";
@@ -279,6 +281,7 @@ export interface WeChatAcpClientOpts {
   showImages?: boolean;
   showAudio?: boolean;
   showResources?: boolean;
+  resourceInlineLimit?: number;
 }
 
 /**
@@ -366,6 +369,7 @@ export class WeChatAcpClient implements acp.Client {
       showDiffs: boolean;
       showImages: boolean;
       showAudio: boolean;
+      showResources: boolean;
     },
   ): Promise<void> {
     return this.enqueue(async () => {
@@ -488,7 +492,7 @@ export class WeChatAcpClient implements acp.Client {
         if (update.status === "completed" && update.content) {
           for (const content of update.content) {
             if (content.type === "content" && content.content.type === "resource_link") {
-              await this.maybeSendResourceLink(content.content, turn, "explicit");
+              await this.maybeSendResourceLink(content.content, turn, "tool");
             }
           }
         }
@@ -543,7 +547,7 @@ export class WeChatAcpClient implements acp.Client {
               }
             } else if (c.type === "content" && c.content.type === "resource_link") {
               resourceLinkContentBlocks++;
-              if (await this.maybeSendResourceLink(c.content, turn, "explicit")) {
+              if (await this.maybeSendResourceLink(c.content, turn, "tool")) {
                 resourceLinkImages++;
               }
             }
@@ -846,7 +850,7 @@ export class WeChatAcpClient implements acp.Client {
           ...(typeof size === "number" ? { size } : {}),
         },
         turn,
-        "explicit",
+        "tool",
       )) {
         images++;
       }
@@ -861,19 +865,25 @@ export class WeChatAcpClient implements acp.Client {
   ): Promise<boolean> {
     const opts = turn.opts;
     const name = sanitizeInlineLabel(link.name ?? resourceDisplayName(link.uri));
+    const explicitArtifact = isArtifactResourceUri(link.uri);
     const mimeType = sanitizeInlineLabel(link.mimeType ?? "")
       .split(";")[0]
       .trim()
       .toLowerCase();
-    if (source === "tool" && opts.showImages === false && mimeType.startsWith("image/")) {
+    if (
+      source === "tool" &&
+      !explicitArtifact &&
+      opts.showImages === false &&
+      mimeType.startsWith("image/")
+    ) {
       opts.log(`[resource-link] skipped tool image (showImages=false, ${name})`);
       return true;
     }
     const routesToImagePipeline =
       SUPPORTED_IMAGE_MIME_TYPES.has(mimeType) &&
-      (source !== "tool" || opts.showImages !== false) &&
+      (source !== "tool" || explicitArtifact || opts.showImages !== false) &&
       Boolean(opts.onImageFlush);
-    if (opts.showResources === false) {
+    if (source === "tool" && !explicitArtifact && opts.showResources === false) {
       opts.log(`[resource-link] skipped (showResources=false, ${name})`);
       return routesToImagePipeline;
     }
@@ -898,7 +908,11 @@ export class WeChatAcpClient implements acp.Client {
         opts.log(`[resource-link] unavailable: ${name}`);
         return false;
       }
-      return await this.maybeSendFile(file, turn, source);
+      return await this.maybeSendFile(
+        file,
+        turn,
+        explicitArtifact ? "explicit" : source,
+      );
     } catch (err) {
       turn.chunks.push(`\n⚠️ [file ${name} could not be resolved]\n`);
       turn.producedMessage = true;
@@ -1131,7 +1145,7 @@ export class WeChatAcpClient implements acp.Client {
       SUPPORTED_IMAGE_MIME_TYPES.has(baseMime) &&
       (source !== "tool" || opts.showImages !== false) &&
       Boolean(opts.onImageFlush);
-    if (opts.showResources === false) {
+    if (source === "tool" && opts.showResources === false) {
       opts.log(`[resource] skipped (showResources=false, ${name})`);
       return routesToImagePipeline;
     }
@@ -1139,6 +1153,29 @@ export class WeChatAcpClient implements acp.Client {
     if ("text" in resource) {
       if (!resource.text.trim()) {
         opts.log(`[resource] skipped empty text resource: ${name}`);
+        return false;
+      }
+      const inlineLimit = opts.resourceInlineLimit ?? DEFAULT_RESOURCE_INLINE_LIMIT;
+      if (source === "tool" && resource.text.length > inlineLimit) {
+        const declaredMime = sanitizeInlineLabel(resource.mimeType ?? "")
+          .split(";")[0]
+          .trim()
+          .toLowerCase();
+        const mimeType = declaredMime.startsWith("image/")
+          ? "text/plain"
+          : declaredMime || "text/plain";
+        opts.log(
+          `[resource] attaching text resource ${name} (${resource.text.length} chars > ${inlineLimit})`,
+        );
+        await this.maybeSendFile(
+          {
+            data: Buffer.from(resource.text, "utf8").toString("base64"),
+            name,
+            mimeType,
+          },
+          turn,
+          source,
+        );
         return false;
       }
       const rendered = renderTextResource(name, resource.mimeType, resource.text);

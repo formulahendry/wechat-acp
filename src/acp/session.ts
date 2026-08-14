@@ -89,6 +89,7 @@ export interface RuntimeBridgeSettings {
   diffs: boolean;
   images: boolean;
   audio: boolean;
+  resources: boolean;
 }
 
 export type RuntimeBridgeSetting = keyof RuntimeBridgeSettings;
@@ -116,6 +117,7 @@ export interface SessionManagerOpts {
   showImages?: boolean;
   showAudio?: boolean;
   showResources?: boolean;
+  resourceInlineLimit?: number;
   createMcpLease?: () => SessionMcpLease;
   agentShutdownTimeoutMs?: number;
   killAgentProcess?: (
@@ -955,6 +957,7 @@ export class SessionManager {
       showImages: this.opts.showImages ?? true,
       showAudio: this.opts.showAudio ?? true,
       showResources: this.opts.showResources ?? true,
+      resourceInlineLimit: this.opts.resourceInlineLimit,
     });
 
     const mcpLease = this.opts.createMcpLease?.();
@@ -1139,6 +1142,7 @@ export class SessionManager {
             showDiffs: outputSettings.diffs,
             showImages: outputSettings.images,
             showAudio: outputSettings.audio,
+            showResources: outputSettings.resources,
           });
           await this.awaitAgentOperation(
             session,
@@ -1552,6 +1556,7 @@ export class SessionManager {
         diffs: this.opts.showDiffs ?? false,
         images: this.opts.showImages ?? true,
         audio: this.opts.showAudio ?? true,
+        resources: this.opts.showResources ?? true,
       };
       this.runtimeBridgeSettings.set(session, settings);
     }

@@ -1,4 +1,9 @@
 export const MAX_AGENT_FILE_BYTES = 25 * 1024 * 1024;
+export const ARTIFACT_RESOURCE_URI_PREFIX = "wechat-acp://artifact/";
+
+export function isArtifactResourceUri(uri: string): boolean {
+  return uri.startsWith(ARTIFACT_RESOURCE_URI_PREFIX);
+}
 
 export interface AgentFile {
   data: string;

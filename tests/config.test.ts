@@ -4,7 +4,9 @@ import { test } from "node:test";
 import {
   BRIDGE_COMMANDS,
   buildAgentSessionScope,
+  defaultConfig,
   matchBridgeCommand,
+  parseResourceInlineLimit,
   parseSessionResumePolicy,
   validateCommandAliases,
 } from "../src/config.js";
@@ -47,6 +49,17 @@ test("session resume policy accepts only documented modes", () => {
   assert.equal(parseSessionResumePolicy("auto"), "auto");
   assert.equal(parseSessionResumePolicy("required"), "required");
   assert.throws(() => parseSessionResumePolicy("yes"), /Invalid session resume policy/);
+});
+
+test("resource inline limit defaults to 1000 and accepts 0 through 4000", () => {
+  assert.equal(defaultConfig().agent.resourceInlineLimit, 1000);
+  assert.equal(parseResourceInlineLimit(0), 0);
+  assert.equal(parseResourceInlineLimit(1000), 1000);
+  assert.equal(parseResourceInlineLimit(4000), 4000);
+  assert.throws(() => parseResourceInlineLimit(-1), /Invalid resource inline limit/);
+  assert.throws(() => parseResourceInlineLimit(4001), /Invalid resource inline limit/);
+  assert.throws(() => parseResourceInlineLimit(1.5), /Invalid resource inline limit/);
+  assert.throws(() => parseResourceInlineLimit("1000"), /Invalid resource inline limit/);
 });
 
 test("acp-more aliases validate and bare aliases match only the full message", () => {

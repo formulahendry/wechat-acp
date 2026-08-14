@@ -67,6 +67,7 @@ const RUNTIME_BRIDGE_CONFIG_OPTIONS: ReadonlyArray<{
   { id: "bridge.diffs", setting: "diffs", name: "Diffs" },
   { id: "bridge.images", setting: "images", name: "Tool Images" },
   { id: "bridge.audio", setting: "audio", name: "Audio" },
+  { id: "bridge.resources", setting: "resources", name: "Tool Resources" },
 ];
 
 interface MessageBuffer {
@@ -174,16 +175,14 @@ export class WeChatAcpBridge {
 
     try {
       // 2. Start the local artifact MCP server and create SessionManager
-      if (this.config.agent.showResources ?? true) {
-        try {
-          this.artifactMcpServer = await startArtifactMcpServer({
-            rootDir: this.config.agent.cwd,
-            log: this.log,
-          });
-        } catch (err) {
-          this.log(`Artifact MCP unavailable; agent file attachments disabled: ${String(err)}`);
-          trackException(err, "artifact_mcp");
-        }
+      try {
+        this.artifactMcpServer = await startArtifactMcpServer({
+          rootDir: this.config.agent.cwd,
+          log: this.log,
+        });
+      } catch (err) {
+        this.log(`Artifact MCP unavailable; agent file attachments disabled: ${String(err)}`);
+        trackException(err, "artifact_mcp");
       }
       const resumePolicy = this.config.session.resume ?? "off";
       if (resumePolicy !== "off" && !this.config.storage.stateFile) {
@@ -227,6 +226,7 @@ export class WeChatAcpBridge {
         showImages: this.config.agent.showImages ?? true,
         showAudio: this.config.agent.showAudio ?? true,
         showResources: this.config.agent.showResources ?? true,
+        resourceInlineLimit: this.config.agent.resourceInlineLimit,
         createMcpLease: this.artifactMcpServer
           ? () => this.artifactMcpServer!.createLease()
           : undefined,
