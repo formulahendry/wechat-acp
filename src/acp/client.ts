@@ -14,6 +14,7 @@ import {
   MAX_AGENT_FILE_BYTES,
   isArtifactResourceUri,
 } from "../artifacts/types.js";
+import { inferMimeType, sanitizeFileName } from "../artifacts/store.js";
 import { DEFAULT_RESOURCE_INLINE_LIMIT } from "../config.js";
 import { TEXT_CHUNK_LIMIT } from "../weixin/send.js";
 
@@ -136,13 +137,12 @@ function base64DecodedByteUpperBound(data: string): number {
 }
 
 /**
- * Human-readable name for a resource: the last path segment of its URI,
- * percent-decoded and sanitized to a single line. Falls back to the full
- * URI when there is no useful path segment (e.g. `untitled:Untitled-1`,
- * an authority with no path like `https://example.com`, or an empty URI),
- * and to `resource` when nothing printable survives sanitization.
+ * Source name for a resource: the last path segment of its URI,
+ * percent-decoded. Falls back to the full URI when there is no useful path
+ * segment (e.g. `untitled:Untitled-1`, an authority with no path like
+ * `https://example.com`, or an empty URI), and to `resource` when blank.
  */
-function resourceDisplayName(uri: string): string {
+function resourceNameFromUri(uri: string): string {
   const trimmed = uri.trim();
   if (!trimmed) return "resource";
   const stripped = trimmed.replace(/[?#].*$/, "");
@@ -170,7 +170,15 @@ function resourceDisplayName(uri: string): string {
       name = last;
     }
   }
-  return sanitizeInlineLabel(name) || "resource";
+  return name || "resource";
+}
+
+function resourceDisplayName(uri: string): string {
+  return sanitizeInlineLabel(resourceNameFromUri(uri)) || "resource";
+}
+
+function resourceAttachmentName(uri: string): string {
+  return sanitizeFileName(resourceNameFromUri(uri));
 }
 
 function resourceFenceLanguage(name: string, mimeType?: string | null): string {
@@ -931,12 +939,13 @@ export class WeChatAcpClient implements acp.Client {
     source: ImageSource,
   ): Promise<boolean> {
     const opts = turn.opts;
-    const name = sanitizeInlineLabel(file.name) || "artifact";
+    const fileName = sanitizeFileName(file.name);
+    const label = sanitizeInlineLabel(fileName) || "artifact";
     const mimeType =
       sanitizeInlineLabel(file.mimeType).split(";")[0].trim().toLowerCase() ||
       "application/octet-stream";
     if (source === "tool" && opts.showImages === false && mimeType.startsWith("image/")) {
-      opts.log(`[file] skipped tool image (showImages=false, ${name})`);
+      opts.log(`[file] skipped tool image (showImages=false, ${label})`);
       return true;
     }
     const decodedBytes = decodedBase64ByteLength(file.data);
@@ -946,37 +955,37 @@ export class WeChatAcpClient implements acp.Client {
       SUPPORTED_IMAGE_MIME_TYPES.has(mimeType) &&
       base64DecodedByteUpperBound(file.data) <= MAX_IMAGE_BYTES
     ) {
-      opts.log(`[file] routing image file ${name} through image pipeline (${mimeType}, ${decodedBytes} bytes)`);
+      opts.log(`[file] routing image file ${label} through image pipeline (${mimeType}, ${decodedBytes} bytes)`);
       await this.maybeSendImage({ data: file.data, mimeType }, turn, source);
       return true;
     }
 
     if (!opts.onFileFlush) {
-      turn.chunks.push(`\n📎 [file: ${name} (${mimeType}) - delivery unavailable]\n`);
+      turn.chunks.push(`\n📎 [file: ${label} (${mimeType}) - delivery unavailable]\n`);
       turn.producedMessage = true;
-      opts.log(`[file] skipped (no file sink configured, ${name})`);
+      opts.log(`[file] skipped (no file sink configured, ${label})`);
       return false;
     }
 
     if (decodedBytes > MAX_AGENT_FILE_BYTES) {
-      turn.chunks.push(`\n⚠️ [file ${name} is too large to deliver]\n`);
+      turn.chunks.push(`\n⚠️ [file ${label} is too large to deliver]\n`);
       turn.producedMessage = true;
       opts.log(
-        `[file] skipped oversized file ${name} (${decodedBytes} bytes > ${MAX_AGENT_FILE_BYTES})`,
+        `[file] skipped oversized file ${label} (${decodedBytes} bytes > ${MAX_AGENT_FILE_BYTES})`,
       );
       return false;
     }
 
     await this.maybeFlushMessage(turn);
     try {
-      await opts.onFileFlush({ data: file.data, name, mimeType });
-      opts.log(`[file] sent ${name} (${mimeType}, ${decodedBytes} bytes)`);
+      await opts.onFileFlush({ data: file.data, name: fileName, mimeType });
+      opts.log(`[file] sent ${label} (${mimeType}, ${decodedBytes} bytes)`);
       turn.producedMessage = true;
       return false;
     } catch (err) {
-      turn.chunks.push(`\n⚠️ [file ${name} could not be delivered]\n`);
+      turn.chunks.push(`\n⚠️ [file ${label} could not be delivered]\n`);
       turn.producedMessage = true;
-      opts.log(`[file] delivery failed for ${name}: ${String(err)}`);
+      opts.log(`[file] delivery failed for ${label}: ${String(err)}`);
       return false;
     }
   }
@@ -1157,20 +1166,22 @@ export class WeChatAcpClient implements acp.Client {
       }
       const inlineLimit = opts.resourceInlineLimit ?? DEFAULT_RESOURCE_INLINE_LIMIT;
       if (source === "tool" && resource.text.length > inlineLimit) {
+        const attachmentName = resourceAttachmentName(resource.uri);
         const declaredMime = sanitizeInlineLabel(resource.mimeType ?? "")
           .split(";")[0]
           .trim()
           .toLowerCase();
-        const mimeType = declaredMime.startsWith("image/")
+        const resolvedMime = declaredMime || inferMimeType(attachmentName);
+        const mimeType = resolvedMime.startsWith("image/")
           ? "text/plain"
-          : declaredMime || "text/plain";
+          : resolvedMime;
         opts.log(
           `[resource] attaching text resource ${name} (${resource.text.length} chars > ${inlineLimit})`,
         );
         await this.maybeSendFile(
           {
             data: Buffer.from(resource.text, "utf8").toString("base64"),
-            name,
+            name: attachmentName,
             mimeType,
           },
           turn,

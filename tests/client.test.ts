@@ -746,6 +746,32 @@ test("text resource above the inline limit is delivered as a file attachment", a
   assert.equal(client.hasProducedMessage, true);
 });
 
+test("text resource attachment preserves a long basename and extension", async () => {
+  const files: AgentFile[] = [];
+  const logs: string[] = [];
+  const client = makeClient({
+    onFileFlush: async (file) => { files.push(file); },
+    log: (message) => { logs.push(message); },
+  });
+  const name = `${"a".repeat(130)}.json`;
+
+  await emitToolCallResource(client, {
+    uri: `file:///workspace/${name}`,
+    text: "x".repeat(1001),
+  });
+
+  assert.equal(files.length, 1);
+  assert.equal(files[0].name, name);
+  assert.equal(files[0].mimeType, "application/json");
+  assert.ok(
+    logs.some((message) =>
+      message.startsWith("[resource] attaching text resource ") &&
+      message.includes("... (1001 chars > 1000)")
+    ),
+    "the log keeps the capped inline label",
+  );
+});
+
 test("resourceInlineLimit=0 delivers every non-empty text resource as a file", async () => {
   const files: AgentFile[] = [];
   const client = makeClient({
