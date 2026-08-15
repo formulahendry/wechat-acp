@@ -182,6 +182,7 @@ test("runtime bridge settings are scoped to a session and applied at the next tu
     showDiffs: false,
     showImages: true,
     showAudio: true,
+    showResources: true,
     log: () => {},
     onReply: async () => {},
     sendTyping: async () => {},
@@ -205,11 +206,13 @@ test("runtime bridge settings are scoped to a session and applied at the next tu
     diffs: false,
     images: true,
     audio: true,
+    resources: true,
   });
   manager.setRuntimeBridgeSetting(session.userId, "thoughts", false);
   manager.setRuntimeBridgeSetting(session.userId, "diffs", true);
   manager.setRuntimeBridgeSetting(session.userId, "images", false);
   manager.setRuntimeBridgeSetting(session.userId, "audio", false);
+  manager.setRuntimeBridgeSetting(session.userId, "resources", false);
 
   await internal.processQueue(session);
 
@@ -218,6 +221,7 @@ test("runtime bridge settings are scoped to a session and applied at the next tu
     showDiffs: true,
     showImages: false,
     showAudio: false,
+    showResources: false,
   }]);
 
   const replacementSession = makeTurnSession({
@@ -231,6 +235,7 @@ test("runtime bridge settings are scoped to a session and applied at the next tu
     diffs: false,
     images: true,
     audio: true,
+    resources: true,
   });
   assert.equal(manager.getRuntimeBridgeSettings("other-user"), undefined);
 });

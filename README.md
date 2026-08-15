@@ -109,7 +109,8 @@ Options:
 - `--show-diffs`: forward ACP file diffs to WeChat (default: hidden)
 - `--hide-images`: suppress inline images from tool calls. Explicit agent message images and attachments are still sent.
 - `--hide-audio`: do not forward agent audio output to WeChat (default: forwarded)
-- `--hide-resources`: do not forward agent resources or generated file attachments to WeChat (default: forwarded)
+- `--hide-resources`: do not forward intermediate tool resources to WeChat (default: forwarded). Explicit agent resources and files sent with `attach_file` are still delivered.
+- `--resource-inline-limit <chars>`: render tool text resources up to this length inline and send longer ones as file attachments (default: `1000`; range: `0` to `4000`; use `0` to attach all non-empty tool text resources)
 - `inject --text <text>`: enqueue a local text message for the running daemon
 - `-V, --version`: print version and exit
 - `-h, --help`: show help
@@ -159,7 +160,8 @@ Example:
   "agent": {
     "preset": "copilot",
     "cwd": "D:/code/project",
-    "showDiffs": true
+    "showDiffs": true,
+    "resourceInlineLimit": 1000
   },
   "session": {
     "idleTimeoutMs": 86400000,
@@ -331,15 +333,15 @@ Examples:
 /acp-config set bridge.diffs on
 /acp-config set bridge.images off
 /acp-config set bridge.audio off
+/acp-config set bridge.resources off
 ```
 
 Notes:
 
 - The command only works after the WeChat user already has an active ACP session. If not, send a normal message first so the session is created.
 - Agent-specific `configId` values come from the ACP agent's `configOptions`, so that part of the list depends on the configured agent.
-- The built-in `bridge.thoughts`, `bridge.diffs`, and `bridge.audio` options control output forwarding for the current WeChat user's session. `bridge.images` controls only inline tool images; explicit response images and attached `resource_link` images are always sent. These options use the startup config as defaults, accept `on` or `off`, and are not persisted across session resets or bridge restarts.
+- The built-in `bridge.thoughts`, `bridge.diffs`, `bridge.audio`, and `bridge.resources` options control intermediate output forwarding for the current WeChat user's session. `bridge.resources off` hides tool resources, including entries from `tool_call_update.rawOutput.contents[]`. When tool resources are on, `agent.resourceInlineLimit` controls whether tool text resources are rendered inline or sent as attachments. `bridge.images` controls only inline tool images. Explicit agent resources, explicit response images, and files sent with `attach_file` are always delivered. These options use the startup config as defaults, accept `on` or `off`, and are not persisted across session resets or bridge restarts.
 - Runtime bridge changes take effect on the next agent turn. They do not change a turn that is already running.
-- `agent.showResources` remains a startup-only setting and is not shown as a runtime option.
 - This command is handled by `wechat-acp` itself and is **not** forwarded to the underlying agent.
 - You can give this command your own aliases via `commandAliases` (see [Customizing bridge command names](#customizing-bridge-command-names-aliases)).
 
@@ -464,8 +466,15 @@ are delivered as native WeChat images instead of file cards.
 
 Tool calls may also expose intermediate screenshots or video frames as inline
 images. Use `--hide-images` or `agent.showImages: false` to suppress them.
-Images that the agent explicitly emits in its response or sends through an
-attached `resource_link` are always sent.
+Images that the agent explicitly emits in its response are always sent.
+Images sent through `attach_file` are always sent.
+
+Tool text resources up to `agent.resourceInlineLimit` characters are shown
+inline. Longer tool text resources are sent as file attachments. The default is
+`1000`; set `--resource-inline-limit 0` to attach every non-empty tool text
+resource. Use `--hide-resources` or `/acp-config set bridge.resources off` to
+hide intermediate tool resources. Explicit agent resources and `attach_file`
+results are still delivered.
 
 The MCP server listens only on a random `127.0.0.1` port, requires a
 process-local bearer token, rejects browser-origin requests, and only reads
@@ -475,8 +484,8 @@ Files are limited to 25 MiB, kept briefly in memory, and consumed once.
 This also handles standard ACP `resource_link` output and Copilot CLI's
 `rawOutput.contents[type=resource_link]` compatibility shape. Agents that do
 not support HTTP MCP injection or do not forward resource links cannot use the
-active `attach_file` flow. `--hide-resources` disables both the tool injection
-and outbound resource/file delivery.
+active `attach_file` flow. Resource visibility settings do not disable the tool
+or its outbound file delivery.
 
 ## Storage
 

@@ -22,6 +22,7 @@ import {
   defaultConfig,
   defaultStorageDir,
   listBuiltInAgents,
+  parseResourceInlineLimit,
   parseSessionResumePolicy,
   resolveAgentSelection,
   validateCommandAliases,
@@ -85,7 +86,10 @@ Options:
   --show-diffs        Forward ACP file diffs to WeChat (default: hidden)
   --hide-images       Do not forward intermediate inline tool images to WeChat
   --hide-audio        Do not forward agent audio output to WeChat (default: forwarded)
-  --hide-resources    Do not forward agent embedded resources to WeChat (default: forwarded)
+  --hide-resources    Do not forward intermediate tool resources
+  --resource-inline-limit <chars>
+                       Attach longer text resources as files (default: 1000)
+                       Valid range: 0-4000; 0 attaches every non-empty text resource
   --text <text>       Message text for "inject"
   --file <path>       Read injected message text from a file
   --to <target>       Injection target (default: ${DEFAULT_INJECTION_TARGET})
@@ -150,6 +154,7 @@ function parseArgs(argv: string[]): {
   hideImages: boolean;
   hideAudio: boolean;
   hideResources: boolean;
+  resourceInlineLimit?: number;
   verbose: boolean;
   version: boolean;
   help: boolean;
@@ -242,6 +247,9 @@ function parseArgs(argv: string[]): {
         break;
       case "--hide-resources":
         result.hideResources = true;
+        break;
+      case "--resource-inline-limit":
+        result.resourceInlineLimit = Number(args[++i]);
         break;
       case "-v":
       case "--verbose":
@@ -537,6 +545,14 @@ async function main(): Promise<void> {
   if (args.hideImages) config.agent.showImages = false;
   if (args.hideAudio) config.agent.showAudio = false;
   if (args.hideResources) config.agent.showResources = false;
+  try {
+    config.agent.resourceInlineLimit = parseResourceInlineLimit(
+      args.resourceInlineLimit ?? config.agent.resourceInlineLimit,
+    );
+  } catch (err) {
+    console.error(`Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
   config.daemon.enabled = args.daemon;
 
   // Handle daemon mode

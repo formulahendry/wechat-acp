@@ -378,6 +378,7 @@ test("a config update that finishes after reset cannot send a stale reply", asyn
           diffs: boolean;
           images: boolean;
           audio: boolean;
+          resources: boolean;
         };
         setSessionConfigOption(): Promise<typeof option[]>;
       };
@@ -389,6 +390,7 @@ test("a config update that finishes after reset cannot send a stale reply", asyn
       diffs: false,
       images: true,
       audio: true,
+      resources: true,
     }),
     setSessionConfigOption: async () => {
       updateStarted();
@@ -426,6 +428,7 @@ test("acp-config updates runtime bridge settings without calling the agent", asy
     diffs: false,
     images: true,
     audio: true,
+    resources: true,
   };
   const updates: Array<{ setting: string; value: boolean }> = [];
   (
@@ -456,17 +459,17 @@ test("acp-config updates runtime bridge settings without calling the agent", asy
 
   await bridge.handleMessage(
     textMessage(
-      `${BRIDGE_COMMANDS.acpConfig} set bridge.images off`,
+      `${BRIDGE_COMMANDS.acpConfig} set bridge.resources off`,
       "context-config",
     ),
   );
 
-  assert.deepEqual(updates, [{ setting: "images", value: false }]);
+  assert.deepEqual(updates, [{ setting: "resources", value: false }]);
   assert.equal(bridge.enqueued.length, 0);
   assert.ok(
     bridge.sent.some(({ segment }) =>
-      segment.includes("bridge.images = off") &&
-      segment.includes("**Tool Images**") &&
+      segment.includes("bridge.resources = off") &&
+      segment.includes("**Tool Resources**") &&
       segment.includes("Runtime Bridge Config") &&
       segment.includes("ACP Session Config")
     ),

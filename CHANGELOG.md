@@ -6,6 +6,14 @@
   by tool calls, including Copilot CLI `rawOutput` fallbacks and embedded image
   resources. Explicit agent message images and attached `resource_link` images
   are always sent.
+- Limit `--hide-resources`, `agent.showResources: false`, and
+  `bridge.resources off` to intermediate tool resources. Explicit agent
+  resources and files sent through `attach_file` are always delivered, and the
+  artifact MCP server remains available when tool resources are hidden. Tool
+  text resources now render inline only up to `agent.resourceInlineLimit`
+  characters, default `1000`; longer resources are sent as file attachments.
+  Configure the startup threshold with `--resource-inline-limit <chars>`, using
+  `0` to attach every non-empty tool text resource. Fixes #78.
 
 - Add `/acp-new` to clear one WeChat user's ACP conversation without restarting
   the bridge. The command stops that user's active turn and agent process, drops
